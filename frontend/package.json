@@ -4,7 +4,8 @@
     "version": "0.0.1",
     "type": "module",
     "scripts": {
-        "dev": "vite"
+        "dev": "vite",
+        "browser:isolated": "powershell -ExecutionPolicy Bypass -File ../scripts/start-dev-browser.ps1"
     },
     "dependencies": {
         "react": "^19.1.0",
