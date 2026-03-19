@@ -1,5 +1,0 @@
-.dev-browser-profile/
-.env
-.env.*
-backend/.env
-!*.env.example
