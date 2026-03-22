@@ -3,7 +3,7 @@ from typing import List
 
 from docx import Document
 
-from app.models import ParsedDocument, ParsedTable
+from app.domain.models import ParsedDocument, ParsedTable
 
 
 class DocxReader:

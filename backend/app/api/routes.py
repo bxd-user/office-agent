@@ -1,12 +1,12 @@
 import json
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 
-from app.schemas import AgentResponse, ResultData
-from app.service import TaskService
+from app.api.schemas import AgentResponse, ResultData
+from app.service import TaskService, infer_roles_from_filenames
 
 router = APIRouter()
 service = TaskService()
@@ -15,26 +15,22 @@ service = TaskService()
 @router.post("/agent/run-workflow", response_model=AgentResponse)
 async def run_workflow(
     files: List[UploadFile] = File(...),
-    roles_json: str = Form(...),
+    roles_json: Optional[str] = Form(None),
     prompt: str = Form(...),
 ):
-    try:
-        roles = json.loads(roles_json)
-    except Exception:
-        return AgentResponse(
-            success=False,
-            message="roles_json 不是合法 JSON",
-            result=ResultData(
-                answer="",
-                file_name="workflow",
-                text_length=0,
-                structured_data=None,
-                output_file_path=None,
-                download_url=None,
-            ),
-            logs=["api: roles_json 解析失败"],
-            error="invalid roles_json",
-        )
+    if roles_json:
+        try:
+            roles = json.loads(roles_json)
+        except Exception:
+            return AgentResponse(
+                success=False,
+                message="roles_json 不是合法 JSON",
+                result=ResultData(),
+                logs=["api: roles_json 解析失败"],
+                error="invalid roles_json",
+            )
+    else:
+        roles = infer_roles_from_filenames(files)
 
     if not isinstance(roles, list) or not all(isinstance(x, str) for x in roles):
         return AgentResponse(

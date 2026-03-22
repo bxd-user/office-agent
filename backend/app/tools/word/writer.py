@@ -1,4 +1,6 @@
 from pathlib import Path
+from uuid import uuid4
+
 from docx import Document
 
 
@@ -32,3 +34,17 @@ class DocxWriter:
         doc.save(str(output_file))
 
         return str(output_file)
+
+    def fill_template(self, template_path: str, data: dict[str, str]) -> str:
+        output_dir = Path("storage/outputs")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        template_name = Path(template_path).name
+        output_path = output_dir / f"{uuid4().hex}_filled_{template_name}"
+
+        normalized_data = {k: str(v) for k, v in (data or {}).items()}
+        return self.replace_placeholders(
+            template_path=template_path,
+            output_path=str(output_path),
+            data=normalized_data,
+        )

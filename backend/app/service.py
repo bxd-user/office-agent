@@ -1,15 +1,31 @@
+import re
 import shutil
 from pathlib import Path
 
+from docx import Document
 from fastapi import UploadFile
 
-from app.agent import WorkflowAgent
-from app.models import InputFile, TaskContext, TaskResult
-from app.tools.docx_reader import DocxReader
+from app.agent.agent import WorkflowAgent
+from app.domain.models import InputFile, TaskContext, TaskResult
+from app.tools.word.reader import DocxReader
 
 
 UPLOAD_DIR = Path("storage/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+TEMPLATE_NAME_HINTS = [
+    "template",
+    "模板",
+    "空表",
+    "样表",
+    "登记表",
+    "申请表",
+    "审核表",
+    "汇总表",
+]
+
+PLACEHOLDER_PATTERN = re.compile(r"\{\{(.*?)\}\}")
 
 
 class TaskService:
@@ -80,6 +96,7 @@ class TaskService:
             )
 
             result = self.agent.run(context)
+            result.logs.append(f"service: 最终 roles -> {roles}")
             result.logs.append("service: 统一工作流任务处理结束")
             return result
 
@@ -92,3 +109,102 @@ class TaskService:
                 logs=logs,
                 error=str(e),
             )
+
+
+def infer_roles_from_filenames(files: list[UploadFile]) -> list[str]:
+    """
+    自动推断文件角色：
+    - 优先找 template
+    - 其余默认为 source
+    """
+    if not files:
+        return []
+
+    if len(files) == 1:
+        return ["source"]
+
+    scored = []
+    for idx, file in enumerate(files):
+        score = _score_template_candidate(file)
+        scored.append((idx, score))
+
+    # 找最像 template 的文件
+    scored.sort(key=lambda x: x[1], reverse=True)
+    best_idx, best_score = scored[0]
+
+    # 如果最高分太低，说明都不像模板 -> 全部 source
+    if best_score < 2:
+        return ["source"] * len(files)
+
+    roles = ["source"] * len(files)
+    roles[best_idx] = "template"
+    return roles
+
+
+def _score_template_candidate(file: UploadFile) -> int:
+    score = 0
+    name = (file.filename or "").lower()
+
+    # 1. 文件名规则
+    for hint in TEMPLATE_NAME_HINTS:
+        if hint.lower() in name:
+            score += 3
+
+    # 2. 只对 docx 做内容规则
+    if not name.endswith(".docx"):
+        return score
+
+    # 保存当前文件指针位置，避免影响后续读取
+    try:
+        current_pos = file.file.tell()
+    except Exception:
+        current_pos = None
+
+    try:
+        doc = Document(file.file)
+
+        # 2.1 占位符
+        placeholder_count = 0
+        for para in doc.paragraphs:
+            placeholder_count += len(PLACEHOLDER_PATTERN.findall(para.text))
+
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    placeholder_count += len(PLACEHOLDER_PATTERN.findall(cell.text))
+
+        if placeholder_count > 0:
+            score += 5
+
+        # 2.2 表格较多
+        if len(doc.tables) >= 2:
+            score += 1
+
+        # 2.3 空白单元格较多
+        empty_cells = 0
+        total_cells = 0
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    total_cells += 1
+                    if not cell.text.strip():
+                        empty_cells += 1
+
+        if total_cells > 0:
+            empty_ratio = empty_cells / total_cells
+            if empty_ratio >= 0.3:
+                score += 2
+
+    except Exception:
+        # 内容分析失败就只用文件名分
+        pass
+    finally:
+        try:
+            if current_pos is not None:
+                file.file.seek(current_pos)
+            else:
+                file.file.seek(0)
+        except Exception:
+            pass
+
+    return score
