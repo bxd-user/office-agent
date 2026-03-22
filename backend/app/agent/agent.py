@@ -1,133 +1,451 @@
-from docx import Document
+# app/agent/agent.py
+from __future__ import annotations
 
+import json
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from app.agent.execution_state import ExecutionState
 from app.agent.executor import StepExecutor
-from app.domain.models import TaskContext, TaskResult
-from app.agent.planner import WorkflowPlanner, PlannerContext, PlannerFileContext
-from app.agent.prompts import (
-    SUMMARIZE_SYSTEM_PROMPT,
-    EXTRACT_SYSTEM_PROMPT,
-    FILL_SYSTEM_PROMPT,
+from app.agent.planner import WorkflowPlanner, PlannerContext
+from app.tools.basic_tools import (
+    LLMExtractFieldsTool,
+    LLMExtractForTemplateTool,
+    LLMSummarizeTool,
+    VerifyDocumentTool,
+    WordExtractPlaceholdersTool,
+    WordFillTemplateTool,
+    WordReadTextTool,
 )
-from app.tools.word.writer import DocxWriter
-from app.core.llm_client import LLMClient
-from app.domain.field_config import EXTRACT_FIELD_CANDIDATES
+from app.tools.registry import ToolRegistry
+
+
+@dataclass
+class AgentFile:
+    file_id: str
+    filename: str
+    path: str
+    file_type: str
+    extension: str
+    role: Optional[str] = None
+
 
 class WorkflowAgent:
-    def __init__(self):
-        self.llm = LLMClient()
-        self.writer = DocxWriter()
-        self.planner = WorkflowPlanner(self.llm)
-        self.executor = StepExecutor()
+    def __init__(
+        self,
+        llm: Any = None,
+        reader: Any = None,
+        writer: Any = None,
+        verifier: Any = None,
+    ) -> None:
+        self.llm = llm
+        self.reader = reader
+        self.writer = writer
+        self.verifier = verifier
 
-        self.SUMMARIZE_SYSTEM_PROMPT = SUMMARIZE_SYSTEM_PROMPT
-        self.EXTRACT_SYSTEM_PROMPT = EXTRACT_SYSTEM_PROMPT
-        self.FILL_SYSTEM_PROMPT = FILL_SYSTEM_PROMPT
+        self.planner = WorkflowPlanner(llm_client=self.llm) if self.llm else None
+        self.registry = ToolRegistry()
+        self.executor = StepExecutor(registry=self.registry)
 
-    def run(self, context: TaskContext) -> TaskResult:
-        logs = list(context.logs)
-        logs.append("agent: 开始执行")
+        self.files: List[AgentFile] = []
 
-        try:
-            planner_context = PlannerContext(
-                user_prompt=context.user_prompt,
-                files=[
-                    PlannerFileContext(
-                        file_id=f"file_{i+1}",
-                        filename=f.file_name,
-                        file_type="word",
-                        extension=".docx",
-                        role_hint=f.role,
-                        content_preview=f.full_text[:500] if f.full_text else "",
-                    )
-                    for i, f in enumerate(context.files)
-                ]
+        if self.llm and self.reader and self.writer and self.verifier:
+            self._register_tools()
+
+    def _register_tools(self) -> None:
+        self.registry.register(WordReadTextTool(self))
+        self.registry.register(WordExtractPlaceholdersTool(self))
+        self.registry.register(LLMExtractForTemplateTool(self))
+        self.registry.register(LLMSummarizeTool(self))
+        self.registry.register(LLMExtractFieldsTool(self))
+        self.registry.register(WordFillTemplateTool(self))
+        self.registry.register(VerifyDocumentTool(self))
+
+    # =========================
+    # 标准 planner -> executor 模式
+    # =========================
+    def run(self, user_prompt: str, files: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if self.planner is None:
+            raise RuntimeError("WorkflowAgent 未完成初始化：缺少 planner")
+        if self.executor is None:
+            raise RuntimeError("WorkflowAgent 未完成初始化：缺少 executor")
+
+        self.files = [self._build_agent_file(i, item) for i, item in enumerate(files)]
+        self._infer_roles()
+
+        planner_context = PlannerContext(
+            user_prompt=user_prompt,
+            files=[self._file_to_prompt_dict(f) for f in self.files],
+            available_tools=self.registry.describe_tools(),
+        )
+
+        plan = self.planner.create_plan(planner_context)
+
+        initial_state = {
+            "user_prompt": user_prompt,
+            "files": [self._file_to_prompt_dict(f) for f in self.files],
+        }
+
+        state = self.executor.execute(plan=plan, initial_state=initial_state)
+        final_answer = self._build_final_answer(state.values, state.step_results)
+
+        return {
+            "mode": "plan_execute",
+            "plan": plan.model_dump(),
+            "state": state.values,
+            "step_results": state.step_results,
+            "final_answer": final_answer,
+        }
+
+    # =========================
+    # ReAct 模式：LLM 每次决定一步
+    # =========================
+    def run_react(self, user_prompt: str, files: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if self.llm is None:
+            raise RuntimeError("WorkflowAgent 未完成初始化：缺少 llm")
+        if self.executor is None:
+            raise RuntimeError("WorkflowAgent 未完成初始化：缺少 executor")
+
+        self.files = [self._build_agent_file(i, item) for i, item in enumerate(files)]
+        self._infer_roles()
+
+        state: Dict[str, Any] = {
+            "user_prompt": user_prompt,
+            "files": [self._file_to_prompt_dict(f) for f in self.files],
+        }
+        history: List[Dict[str, Any]] = []
+        available_tools = self.registry.describe_tools()
+
+        max_steps = 10
+
+        for idx in range(max_steps):
+            summarized_state = self._summarize_state_for_llm(state)
+            summarized_history = self._summarize_history_for_llm(history, limit=5)
+
+            decision = self.llm.decide_next_step(
+                user_prompt=user_prompt,
+                files=state["files"],
+                available_tools=available_tools,
+                state=summarized_state,
+                history=summarized_history,
             )
 
-            plan = self.planner.create_plan(planner_context)
-            logs.append(f"agent: 规划任务类型 -> {plan.task_type}")
-            logs.append(f"agent: 执行步骤数量 -> {len(plan.steps)}")
+            if not isinstance(decision, dict):
+                return {
+                    "mode": "react",
+                    "final_answer": "LLM 决策结果不是合法对象",
+                    "state": state,
+                    "history": history,
+                }
 
-            self._apply_plan_file_roles(context, plan.file_roles, logs)
-            self._refresh_context_legacy_fields(context)
+            decision_type = decision.get("type")
 
-            return self.executor.run(
-                agent=self,
-                context=context,
-                plan=plan,
-                logs=logs,
+            if decision_type == "final":
+                final_answer = decision.get("final_answer") or self._build_final_answer(state, history)
+                return {
+                    "mode": "react",
+                    "final_answer": final_answer,
+                    "state": state,
+                    "history": history,
+                }
+
+            if decision_type != "tool_call":
+                history.append(
+                    {
+                        "step": idx + 1,
+                        "type": "invalid_decision",
+                        "decision": decision,
+                    }
+                )
+                return {
+                    "mode": "react",
+                    "final_answer": "决策格式错误",
+                    "state": state,
+                    "history": history,
+                }
+
+            tool_name = decision.get("tool_name")
+            args = decision.get("args", {})
+            output_key = decision.get("output_key") or f"step_{idx + 1}"
+            reason = decision.get("reason", "")
+
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                error_result = {"error": f"工具名无效: {tool_name}"}
+                state[output_key] = error_result
+                history.append(
+                    {
+                        "step": idx + 1,
+                        "type": "tool_call",
+                        "tool_name": tool_name,
+                        "args": args,
+                        "resolved_args": None,
+                        "output_key": output_key,
+                        "result": error_result,
+                        "reason": reason,
+                    }
+                )
+                continue
+
+            try:
+                tool = self.registry.get(tool_name)
+            except Exception as e:
+                error_result = {"error": f"未知工具: {tool_name}, detail={str(e)}"}
+                state[output_key] = error_result
+                history.append(
+                    {
+                        "step": idx + 1,
+                        "type": "tool_call",
+                        "tool_name": tool_name,
+                        "args": args,
+                        "resolved_args": None,
+                        "output_key": output_key,
+                        "result": error_result,
+                        "reason": reason,
+                    }
+                )
+                continue
+
+            try:
+                resolve_state = ExecutionState(values=state)
+                resolved_args = self.executor._resolve_value(args, resolve_state)
+            except Exception as e:
+                error_result = {"error": f"参数解析失败: {str(e)}"}
+                state[output_key] = error_result
+                history.append(
+                    {
+                        "step": idx + 1,
+                        "type": "tool_call",
+                        "tool_name": tool_name,
+                        "args": args,
+                        "resolved_args": None,
+                        "output_key": output_key,
+                        "result": error_result,
+                        "reason": reason,
+                    }
+                )
+                continue
+
+            try:
+                result = tool.run(**resolved_args)
+            except Exception as e:
+                result = {"error": f"工具执行失败: {str(e)}"}
+
+            state[output_key] = result
+            history.append(
+                {
+                    "step": idx + 1,
+                    "type": "tool_call",
+                    "tool_name": tool_name,
+                    "args": args,
+                    "resolved_args": resolved_args,
+                    "output_key": output_key,
+                    "result": result,
+                    "reason": reason,
+                }
             )
 
-        except Exception as e:
-            logs.append(f"agent error: {str(e)}")
-            return TaskResult(
-                success=False,
-                message="执行失败",
-                answer="",
-                logs=logs,
-                error=str(e),
-            )
+        return {
+            "mode": "react",
+            "final_answer": self._build_final_answer(state, history) or "达到最大步数，任务中止",
+            "state": state,
+            "history": history,
+        }
 
-    def _extract_requested_fields(self, prompt: str) -> list[str]:
-        return [field for field in EXTRACT_FIELD_CANDIDATES if field in prompt]
+    # =========================
+    # 基础文件与角色
+    # =========================
+    def _build_agent_file(self, idx: int, item: Dict[str, Any]) -> AgentFile:
+        path = item["path"]
+        filename = item.get("filename") or Path(path).name
+        extension = Path(path).suffix.lower()
 
-    def _apply_plan_file_roles(self, context: TaskContext, file_roles: dict[str, str], logs: list[str]) -> None:
-        if not file_roles:
-            logs.append("agent: planner 未返回 file_roles，沿用输入角色")
+        if extension == ".docx":
+            file_type = "word"
+        elif extension in {".xlsx", ".xls"}:
+            file_type = "excel"
+        else:
+            file_type = "unknown"
+
+        return AgentFile(
+            file_id=str(idx),
+            filename=filename,
+            path=path,
+            file_type=file_type,
+            extension=extension,
+            role=item.get("role"),
+        )
+
+    def _infer_roles(self) -> None:
+        if len(self.files) == 1:
+            if self.files[0].role is None:
+                self.files[0].role = "source"
             return
 
-        for i, file in enumerate(context.files, start=1):
-            file_id = f"file_{i}"
-            new_role = file_roles.get(file_id)
-            if new_role and new_role != file.role:
-                logs.append(f"agent: 角色修正 {file.file_name}: {file.role} -> {new_role}")
-                file.role = new_role
+        for f in self.files:
+            if f.role:
+                continue
 
-    def _refresh_context_legacy_fields(self, context: TaskContext) -> None:
-        source_files = [f for f in context.files if f.role == "source"]
-        template_file = next((f for f in context.files if f.role == "template"), None)
+            lower_name = f.filename.lower()
+            if "模板" in f.filename or "空表" in f.filename or "template" in lower_name:
+                f.role = "template"
+            else:
+                f.role = "source"
 
-        if source_files:
-            context.file_name = source_files[0].file_name
-            context.file_path = source_files[0].file_path
-            context.full_text = "\n\n".join(
-                f"===== {f.file_name} =====\n{f.full_text}" for f in source_files
+    def get_file_by_role(self, role: str) -> AgentFile:
+        for f in self.files:
+            if f.role == role:
+                return f
+        raise ValueError(f"No file found for role: {role}")
+
+    def _file_to_prompt_dict(self, f: AgentFile) -> Dict[str, Any]:
+        return {
+            "file_id": f.file_id,
+            "filename": f.filename,
+            "path": f.path,
+            "file_type": f.file_type,
+            "extension": f.extension,
+            "role": f.role,
+        }
+
+    # =========================
+    # 文档辅助能力
+    # =========================
+    def extract_template_placeholders(self, path: str) -> List[str]:
+        """
+        修正为适配你当前 reader.py 的 read(path) -> ParsedDocument
+        """
+        parsed = self.reader.read(path)
+        text = parsed.full_text or ""
+
+        found = re.findall(r"\{\{(.*?)\}\}", text)
+        cleaned: List[str] = []
+        seen = set()
+
+        for item in found:
+            value = item.strip()
+            if value and value not in seen:
+                cleaned.append(value)
+                seen.add(value)
+
+        return cleaned
+
+    # =========================
+    # 给 LLM 的上下文压缩
+    # =========================
+    def _summarize_state_for_llm(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        summary: Dict[str, Any] = {}
+
+        for k, v in state.items():
+            if k in {"user_prompt", "files"}:
+                summary[k] = v
+                continue
+
+            summary[k] = self._compact_value(v)
+
+        return summary
+
+    def _summarize_history_for_llm(self, history: List[Dict[str, Any]], limit: int = 5) -> List[Dict[str, Any]]:
+        compacted: List[Dict[str, Any]] = []
+
+        for item in history[-limit:]:
+            compacted.append(
+                {
+                    "step": item.get("step"),
+                    "type": item.get("type"),
+                    "tool_name": item.get("tool_name"),
+                    "output_key": item.get("output_key"),
+                    "reason": item.get("reason"),
+                    "result": self._compact_value(item.get("result")),
+                }
             )
 
-        if template_file:
-            context.template_file_name = template_file.file_name
-            context.template_file_path = template_file.file_path
+        return compacted
 
-    def _extract_template_placeholders(self, context: TaskContext) -> list[str]:
-        template_file = None
-        for file in context.files:
-            if file.role == "template":
-                template_file = file
-                break
+    def _compact_value(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            compact: Dict[str, Any] = {}
 
-        if not template_file:
-            return []
+            if "error" in value:
+                compact["error"] = value["error"]
 
-        import re
+            if "summary" in value and isinstance(value["summary"], str):
+                compact["summary"] = value["summary"][:800]
 
-        pattern = re.compile(r"\{\{(.*?)\}\}")
-        doc = Document(template_file.file_path)
+            if "text" in value and isinstance(value["text"], str):
+                compact["text_preview"] = value["text"][:800]
+                compact["text_length"] = len(value["text"])
 
-        found = []
+            if "placeholders" in value and isinstance(value["placeholders"], list):
+                compact["placeholders"] = value["placeholders"][:50]
 
-        for para in doc.paragraphs:
-            found.extend(pattern.findall(para.text))
+            if "filled_data" in value and isinstance(value["filled_data"], dict):
+                compact["filled_data"] = {
+                    k: (str(v)[:120] if v is not None else "")
+                    for k, v in list(value["filled_data"].items())[:30]
+                }
 
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    found.extend(pattern.findall(cell.text))
+            if "missing_fields" in value and isinstance(value["missing_fields"], list):
+                compact["missing_fields"] = value["missing_fields"][:50]
 
-        result = []
-        seen = set()
-        for item in found:
-            key = item.strip()
-            if key and key not in seen:
-                seen.add(key)
-                result.append(key)
+            if "output_path" in value:
+                compact["output_path"] = value["output_path"]
 
-        return result
+            if "file_path" in value:
+                compact["file_path"] = value["file_path"]
+
+            # 如果上面一个字段都没命中，递归压缩前几个键
+            if not compact:
+                for idx, (k, v) in enumerate(value.items()):
+                    if idx >= 8:
+                        compact["__truncated__"] = True
+                        break
+                    compact[k] = self._compact_value(v)
+
+            return compact
+
+        if isinstance(value, list):
+            compact_list = [self._compact_value(v) for v in value[:8]]
+            if len(value) > 8:
+                compact_list.append({"__truncated__": True, "size": len(value)})
+            return compact_list
+
+        if isinstance(value, str):
+            return value[:300]
+
+        return value
+
+    # =========================
+    # 最终答案组装
+    # =========================
+    def _build_final_answer(self, state: Dict[str, Any], records: List[Dict[str, Any]]) -> str:
+        # 1. 常见摘要输出
+        for key in ["summary", "summary_result"]:
+            value = state.get(key)
+            if isinstance(value, dict):
+                summary = value.get("summary")
+                if isinstance(summary, str) and summary.strip():
+                    return summary.strip()
+
+        # 2. 模板填充输出
+        for key in ["filled_doc", "filled_doc_result", "output_file"]:
+            value = state.get(key)
+            if isinstance(value, dict):
+                output_path = value.get("output_path")
+                if isinstance(output_path, str) and output_path.strip():
+                    return f"已完成，输出文件: {output_path}"
+
+        # 3. 从记录倒序兜底
+        for record in reversed(records):
+            result = record.get("result")
+            if isinstance(result, dict):
+                summary = result.get("summary")
+                if isinstance(summary, str) and summary.strip():
+                    return summary.strip()
+
+                output_path = result.get("output_path")
+                if isinstance(output_path, str) and output_path.strip():
+                    return f"已完成，输出文件: {output_path}"
+
+        return "任务执行完成"

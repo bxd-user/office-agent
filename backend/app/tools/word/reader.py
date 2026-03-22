@@ -59,3 +59,7 @@ class DocxReader:
             tables=tables,
             full_text=full_text,
         )
+
+    def read_text(self, file_path: str) -> str:
+        parsed = self.read(file_path)
+        return parsed.full_text

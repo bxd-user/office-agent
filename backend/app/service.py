@@ -30,8 +30,15 @@ PLACEHOLDER_PATTERN = re.compile(r"\{\{(.*?)\}\}")
 
 class TaskService:
     def __init__(self):
+        from app.core.llm_client import LLMClient
+        from app.tools.word.writer import DocxWriter
+        from app.tools.word.verifier import DocxVerifier
+        
         self.reader = DocxReader()
-        self.agent = WorkflowAgent()
+        llm_client = LLMClient()
+        writer = DocxWriter()
+        verifier = DocxVerifier()
+        self.agent = WorkflowAgent(llm=llm_client, reader=self.reader, writer=writer, verifier=verifier)
 
     def run_workflow_task(
         self,
@@ -95,7 +102,39 @@ class TaskService:
                 tables=[],
             )
 
-            result = self.agent.run(context)
+            # 转换为TaskResult
+            try:
+                agent_files = [
+                    {
+                        "filename": f.file_name,
+                        "path": f.file_path,
+                        "role": f.role,
+                    }
+                    for f in parsed_files
+                ]
+                agent_result = self.agent.run(
+                    user_prompt=user_prompt,
+                    files=agent_files,
+                )
+                
+                result = TaskResult(
+                    success=True,
+                    message="任务执行成功",
+                    answer=agent_result.get("final_answer", ""),
+                    logs=logs + [f"agent: {str(agent_result)}"],
+                    structured_data=agent_result.get("state", {}),
+                    output_file_path=None,
+                )
+            except Exception as e:
+                logs.append(f"agent error: {str(e)}")
+                result = TaskResult(
+                    success=False,
+                    message="agent执行失败",
+                    answer="",
+                    logs=logs,
+                    error=str(e),
+                )
+            
             result.logs.append(f"service: 最终 roles -> {roles}")
             result.logs.append("service: 统一工作流任务处理结束")
             return result

@@ -16,6 +16,8 @@ class StepRecord:
 @dataclass
 class ExecutionState:
     current_step_id: Optional[str] = None
+    values: Dict[str, Any] = field(default_factory=dict)
+    step_results: List[Dict[str, Any]] = field(default_factory=list)
     step_records: List[StepRecord] = field(default_factory=list)
 
     # 多文件文本
@@ -41,6 +43,12 @@ class ExecutionState:
     last_review_report: Dict[str, Any] = field(default_factory=dict)
     repaired_fill_data: Dict[str, Any] = field(default_factory=dict)
     unreplaced_placeholders: List[str] = field(default_factory=list)
+
+    def set_value(self, key: str, value: Any) -> None:
+        self.values[key] = value
+
+    def get_value(self, key: str, default: Any = None) -> Any:
+        return self.values.get(key, default)
 
     def add_step_record(self, step_id: str, action: str) -> StepRecord:
         record = StepRecord(step_id=step_id, action=action, status="running")
