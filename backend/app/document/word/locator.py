@@ -1,0 +1,3 @@
+"""
+Word Document Locator module.
+"""

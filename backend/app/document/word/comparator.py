@@ -1,0 +1,3 @@
+"""
+Word Document Comparator module.
+"""

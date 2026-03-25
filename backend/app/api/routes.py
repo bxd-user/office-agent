@@ -1,89 +1,89 @@
-import json
-from pathlib import Path
-from typing import List, Optional
+from __future__ import annotations
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from fastapi.responses import FileResponse
+import os
+import uuid
+from fastapi import APIRouter, UploadFile, File, Form
 
-from app.api.schemas import AgentResponse, ResultData
-from app.service import TaskService, infer_roles_from_filenames
+from app.agent.runtime import AgentRuntime
+from app.agent.session import AgentSession
+from app.api.schemas import AgentResponse
+from app.core.config import settings
+from app.core.file_store import FileStore
+from app.core.llm_client import LLMClient
+from app.document.word.adapter import WordAdapter
+from app.mcp.client import LocalMCPClient
+from app.mcp.registry import MCPServerRegistry
+from app.mcp.servers.file_server import FileServer
+from app.mcp.servers.word_server import WordServer
+from app.mcp.servers.understanding_server import UnderstandingServer
 
 router = APIRouter()
-service = TaskService()
 
 
-@router.post("/agent/run-workflow", response_model=AgentResponse)
-async def run_workflow(
-    files: List[UploadFile] = File(...),
-    roles_json: Optional[str] = Form(None),
+def build_runtime() -> AgentRuntime:
+    file_store = FileStore(
+        upload_dir=settings.UPLOAD_DIR,
+        output_dir=settings.OUTPUT_DIR,
+    )
+    llm_client = LLMClient(
+        model=settings.LLM_MODEL,
+        api_key=settings.LLM_API_KEY,
+        base_url=settings.LLM_BASE_URL,
+    )
+    word_adapter = WordAdapter()
+
+    registry = MCPServerRegistry()
+    registry.register_server(FileServer(file_store=file_store))
+    registry.register_server(WordServer(word_adapter=word_adapter))
+    registry.register_server(UnderstandingServer(llm_client=llm_client))
+
+    mcp_client = LocalMCPClient(registry=registry)
+    return AgentRuntime(llm_client=llm_client, mcp_client=mcp_client)
+
+
+@router.post("/agent/run", response_model=AgentResponse)
+async def run_agent(
     prompt: str = Form(...),
+    files: list[UploadFile] = File(default=[]),
 ):
-    if roles_json:
-        try:
-            roles = json.loads(roles_json)
-        except Exception:
-            return AgentResponse(
-                success=False,
-                message="roles_json 不是合法 JSON",
-                result=ResultData(),
-                logs=["api: roles_json 解析失败"],
-                error="invalid roles_json",
-            )
-    else:
-        roles = infer_roles_from_filenames(files)
+    try:
+        task_id = str(uuid.uuid4())
+        upload_dir = os.path.join(settings.UPLOAD_DIR, task_id)
+        os.makedirs(upload_dir, exist_ok=True)
 
-    if not isinstance(roles, list) or not all(isinstance(x, str) for x in roles):
+        file_infos = []
+        for idx, f in enumerate(files, start=1):
+            filename = f.filename or f"upload_{idx}"
+            save_path = os.path.join(upload_dir, filename)
+            with open(save_path, "wb") as out:
+                out.write(await f.read())
+
+            file_infos.append({
+                "file_id": filename,
+                "filename": filename,
+                "path": save_path,
+            })
+
+        runtime = build_runtime()
+        session = AgentSession(
+            task_id=task_id,
+            user_prompt=prompt,
+            files=file_infos,
+        )
+        result = runtime.run(session)
+
+        return AgentResponse(
+            success=True,
+            answer=result.answer,
+            output_files=result.output_files,
+            tool_trace=result.tool_trace,
+        )
+    except Exception as e:
+        detail = str(e).strip()
+        if not detail:
+            detail = repr(e)
         return AgentResponse(
             success=False,
-            message="roles_json 必须是字符串数组",
-            result=ResultData(
-                answer="",
-                file_name="workflow",
-                text_length=0,
-                structured_data=None,
-                output_file_path=None,
-                download_url=None,
-            ),
-            logs=["api: roles_json 类型不正确"],
-            error="roles_json must be list[str]",
+            answer="",
+            error=detail,
         )
-
-    result = service.run_workflow_task(
-        files=files,
-        roles=roles,
-        user_prompt=prompt,
-    )
-
-    download_url = None
-    if result.output_file_path:
-        output_name = Path(result.output_file_path).name
-        download_url = f"/files/{output_name}"
-
-    return AgentResponse(
-        success=result.success,
-        message=result.message,
-        result=ResultData(
-            answer=result.answer,
-            file_name="workflow",
-            text_length=len(result.answer or ""),
-            structured_data=result.structured_data,
-            output_file_path=result.output_file_path,
-            download_url=download_url,
-        ),
-        logs=result.logs,
-        error=result.error,
-    )
-
-
-@router.get("/files/{filename}")
-async def download_file(filename: str):
-    file_path = Path("storage/outputs") / filename
-
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="文件不存在")
-
-    return FileResponse(
-        path=str(file_path),
-        filename=filename,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    )
