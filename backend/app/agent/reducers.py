@@ -30,6 +30,10 @@ class ToolResultReducer:
             if file_id:
                 memory.table_views[file_id] = content.get("tables", [])
 
+        elif tool_name == "excel.read_preview":
+            if file_id:
+                memory.table_views[file_id] = content
+
         elif tool_name == "understanding.extract_fields":
             if file_id:
                 memory.remember_fields(file_id, content)

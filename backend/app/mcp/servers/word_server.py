@@ -4,7 +4,7 @@ import os
 import uuid
 from typing import List
 
-from app.document.word.adapter import WordAdapter
+from app.document.adapters.word_adapter import WordAdapter
 from app.mcp.servers.base import BaseMCPServer
 from app.mcp.types import ServerInfo, ToolCall, ToolResult, ToolSchema
 

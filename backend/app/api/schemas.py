@@ -1,10 +1,17 @@
-from pydantic import BaseModel
-from typing import Any, Dict, List, Optional
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 
-class AgentResponse(BaseModel):
+class AgentRunRequest(BaseModel):
+    user_request: str
+    files: list[dict[str, Any]] = Field(default_factory=list)
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentRunResponse(BaseModel):
     success: bool
-    answer: str
-    output_files: List[Dict[str, Any]] = []
-    tool_trace: List[Dict[str, Any]] = []
-    error: Optional[str] = None
+    answer: str = ""
+    result: dict[str, Any]

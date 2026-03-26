@@ -1,43 +1,49 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+import json
+from typing import Any
 
-from app.agent.plan_models import PlanStep, StepExecutionRecord
+from app.agent.prompts import VALIDATION_SUMMARY_PROMPT
+from app.core.llm_client import LLMClient, LLMClientError
 
 
 class Verifier:
-    def __init__(self, llm_client):
-        self.llm_client = llm_client
+    def __init__(self, llm_client: LLMClient | None = None) -> None:
+        self.llm = llm_client or LLMClient()
 
-    def verify_step(self, context, step: PlanStep, record: StepExecutionRecord) -> Dict[str, Any]:
-        if not record.success:
+    def summarize(
+        self,
+        observations: list[dict[str, Any]],
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self.llm.enabled:
+            return self._fallback_summary(observations)
+
+        payload = {
+            "observations": observations,
+            "context": context,
+        }
+        try:
+            result = self.llm.chat_json(
+                system_prompt=VALIDATION_SUMMARY_PROMPT,
+                user_prompt=json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+                temperature=0.0,
+            )
+            return result
+        except LLMClientError:
+            return self._fallback_summary(observations)
+
+    @staticmethod
+    def _fallback_summary(observations: list[dict[str, Any]]) -> dict[str, Any]:
+        failed = [o for o in observations if not o.get("success", False)]
+        if failed:
             return {
-                "passed": False,
-                "reason": record.error or "Step execution failed",
-                "missing": [],
+                "success": False,
+                "summary": "部分步骤执行失败。",
+                "issues": [f.get("message", "unknown failure") for f in failed],
             }
-
-        verification = self.llm_client.verify_step(
-            user_prompt=context.user_prompt,
-            plan_goal=context.plan.goal if context.plan else "",
-            current_step={
-                "step_id": step.step_id,
-                "title": step.title,
-                "objective": step.objective,
-                "expected_outputs": step.expected_outputs,
-            },
-            step_record={
-                "tool_calls": record.tool_calls,
-                "outputs": record.outputs,
-            },
-            memory_snapshot=context.memory.snapshot(),
-        )
-
-        if not verification:
-            return {
-                "passed": True,
-                "reason": "No verifier response; default pass",
-                "missing": [],
-            }
-
-        return verification
+        return {
+            "success": True,
+            "summary": "任务执行完成。",
+            "issues": [],
+        }

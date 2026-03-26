@@ -1,31 +1,40 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from app.agent.memory import WorkingMemory
-from app.agent.plan_models import ExecutionPlan, StepExecutionRecord
+from app.agent.schemas.action import ActionObservation, ExecutionArtifact, ExecutionState
 
 
-@dataclass
 class ExecutionContext:
-    task_id: str
-    user_prompt: str
-    files: List[Dict[str, Any]]
+    def __init__(self) -> None:
+        self.state = ExecutionState()
 
-    plan: Optional[ExecutionPlan] = None
-    memory: WorkingMemory = field(default_factory=WorkingMemory)
-    step_records: List[StepExecutionRecord] = field(default_factory=list)
+    def add_observation(self, observation: ActionObservation) -> None:
+        self.state.add_observation(observation)
 
-    max_retries_per_step: int = 2
-    replan_count: int = 0
-    max_replans: int = 1
+    def get_observation(self, step_id: str) -> ActionObservation | None:
+        return self.state.get_observation(step_id)
 
-    def add_step_record(self, record: StepExecutionRecord) -> None:
-        self.step_records.append(record)
+    def add_artifact(self, name: str, artifact_type: str, value: Any, source_step_id: str | None = None) -> None:
+        artifact = ExecutionArtifact(
+            name=name,
+            type=artifact_type,
+            value=value,
+            source_step_id=source_step_id,
+        )
+        self.state.add_artifact(artifact)
 
-    def get_step_record(self, step_id: str) -> Optional[StepExecutionRecord]:
-        for r in self.step_records:
-            if r.step_id == step_id:
-                return r
-        return None
+    def get_artifact(self, name: str) -> ExecutionArtifact | None:
+        return self.state.get_artifact(name)
+
+    def require_artifact(self, name: str) -> ExecutionArtifact:
+        artifact = self.get_artifact(name)
+        if artifact is None:
+            raise ValueError(f"Artifact not found: {name}")
+        return artifact
+
+    def export_debug_dict(self) -> dict[str, Any]:
+        return {
+            "observations": {k: v.model_dump() for k, v in self.state.observations.items()},
+            "artifacts": {k: v.model_dump() for k, v in self.state.artifacts.items()},
+        }

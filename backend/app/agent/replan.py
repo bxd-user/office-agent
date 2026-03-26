@@ -1,47 +1,58 @@
 from __future__ import annotations
 
-from app.agent.plan_models import ExecutionPlan, PlanStep
+import json
+from typing import Any
+
+from pydantic import ValidationError
+
+from app.agent.prompts import REPLAN_SYSTEM_PROMPT
+from app.agent.schemas.action import ActionPlan
+from app.agent.schemas.plan import PlannerOutput
+from app.core.llm_client import LLMClient, LLMClientError
 
 
 class Replanner:
-    def __init__(self, llm_client):
-        self.llm_client = llm_client
+    def __init__(self, llm_client: LLMClient | None = None) -> None:
+        self.llm = llm_client or LLMClient()
 
-    def replan(self, context) -> ExecutionPlan | None:
-        if context.replan_count >= context.max_replans:
-            return None
+    def rebuild_plan(
+        self,
+        user_request: str,
+        files: list[dict[str, Any]],
+        old_plan: ActionPlan,
+        execution_trace: list[dict[str, Any]],
+    ) -> ActionPlan:
+        if not self.llm.enabled:
+            return old_plan
 
-        replanned = self.llm_client.replan_task(
-            user_prompt=context.user_prompt,
-            current_plan=self._serialize_plan(context.plan),
-            memory_snapshot=context.memory.snapshot(),
-            step_records=[self._serialize_record(r) for r in context.step_records],
+        payload = {
+            "user_request": user_request,
+            "files": files,
+            "old_plan": old_plan.model_dump(),
+            "execution_trace": execution_trace,
+            "required_output": {
+                "steps": []
+            },
+        }
+
+        try:
+            result = self.llm.chat_json(
+                system_prompt=REPLAN_SYSTEM_PROMPT,
+                user_prompt=json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+                temperature=0.1,
+            )
+        except LLMClientError:
+            return old_plan
+
+        try:
+            parsed = PlannerOutput.model_validate(result)
+        except ValidationError as e:
+            return old_plan
+
+        return ActionPlan(
+            steps=parsed.steps,
+            metadata={
+                "planner": "replanner_llm",
+                "raw_output": result,
+            },
         )
-        if not replanned:
-            return None
-
-        context.replan_count += 1
-        return replanned
-
-    def _serialize_plan(self, plan):
-        if plan is None:
-            return None
-        return {
-            "goal": plan.goal,
-            "task_type": plan.task_type,
-            "file_roles": [vars(fr) for fr in plan.file_roles],
-            "steps": [vars(s) for s in plan.steps],
-            "success_criteria": plan.success_criteria,
-            "assumptions": plan.assumptions,
-            "requires_output_file": plan.requires_output_file,
-        }
-
-    def _serialize_record(self, record):
-        return {
-            "step_id": record.step_id,
-            "tool_calls": record.tool_calls,
-            "outputs": record.outputs,
-            "success": record.success,
-            "error": record.error,
-            "verifier_result": record.verifier_result,
-        }

@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 from fastapi import FastAPI
-from app.api.routes import router
 
-app = FastAPI(title="Office Agent MCP")
+from app.api.routes import router as api_router
 
-app.include_router(router, prefix="/api")
+
+app = FastAPI(title="Office Agent")
+app.include_router(api_router, prefix="/api")

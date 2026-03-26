@@ -59,6 +59,7 @@ class WorkingMemory:
             "document_texts": self.document_texts,
             "document_texts_keys": list(self.document_texts.keys()),
             "document_structures_keys": list(self.document_structures.keys()),
+            "table_views": self.table_views,
             "table_views_keys": list(self.table_views.keys()),
             "extracted_fields": self.extracted_fields,
             "candidate_mappings": self.candidate_mappings,

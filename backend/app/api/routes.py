@@ -1,89 +1,110 @@
 from __future__ import annotations
 
+import json
 import os
 import uuid
-from fastapi import APIRouter, UploadFile, File, Form
+
+from fastapi import APIRouter, File, Form, UploadFile
 
 from app.agent.runtime import AgentRuntime
-from app.agent.session import AgentSession
-from app.api.schemas import AgentResponse
+from app.api.schemas import AgentRunRequest, AgentRunResponse
 from app.core.config import settings
-from app.core.file_store import FileStore
-from app.core.llm_client import LLMClient
-from app.document.word.adapter import WordAdapter
-from app.mcp.client import LocalMCPClient
-from app.mcp.registry import MCPServerRegistry
-from app.mcp.servers.file_server import FileServer
-from app.mcp.servers.word_server import WordServer
-from app.mcp.servers.understanding_server import UnderstandingServer
+
 
 router = APIRouter()
 
 
-def build_runtime() -> AgentRuntime:
-    file_store = FileStore(
-        upload_dir=settings.UPLOAD_DIR,
-        output_dir=settings.OUTPUT_DIR,
-    )
-    llm_client = LLMClient(
-        model=settings.LLM_MODEL,
-        api_key=settings.LLM_API_KEY,
-        base_url=settings.LLM_BASE_URL,
-    )
-    word_adapter = WordAdapter()
-
-    registry = MCPServerRegistry()
-    registry.register_server(FileServer(file_store=file_store))
-    registry.register_server(WordServer(word_adapter=word_adapter))
-    registry.register_server(UnderstandingServer(llm_client=llm_client))
-
-    mcp_client = LocalMCPClient(registry=registry)
-    return AgentRuntime(llm_client=llm_client, mcp_client=mcp_client)
+def extract_answer(result: dict) -> str:
+    summary = result.get("summary", {}) if isinstance(result, dict) else {}
+    if isinstance(summary, dict):
+        text = summary.get("summary", "")
+        if isinstance(text, str):
+            return text
+    return ""
 
 
-@router.post("/agent/run", response_model=AgentResponse)
+def build_file_resolver(files: list[dict]):
+    file_map = {f["file_id"]: f for f in files}
+
+    def resolve(file_id: str) -> dict:
+        if file_id not in file_map:
+            raise ValueError(f"Unknown file_id: {file_id}")
+        return file_map[file_id]
+
+    return resolve
+
+
+@router.post("/agent/run", response_model=AgentRunResponse)
 async def run_agent(
     prompt: str = Form(...),
     files: list[UploadFile] = File(default=[]),
-):
+    capabilities: str = Form(default="{}"),
+) -> AgentRunResponse:
     try:
         task_id = str(uuid.uuid4())
         upload_dir = os.path.join(settings.UPLOAD_DIR, task_id)
         os.makedirs(upload_dir, exist_ok=True)
 
-        file_infos = []
-        for idx, f in enumerate(files, start=1):
-            filename = f.filename or f"upload_{idx}"
+        file_infos: list[dict] = []
+        for idx, file in enumerate(files, start=1):
+            filename = file.filename or f"upload_{idx}"
             save_path = os.path.join(upload_dir, filename)
             with open(save_path, "wb") as out:
-                out.write(await f.read())
+                out.write(await file.read())
 
-            file_infos.append({
-                "file_id": filename,
-                "filename": filename,
-                "path": save_path,
-            })
+            file_infos.append(
+                {
+                    "file_id": filename,
+                    "filename": filename,
+                    "path": save_path,
+                }
+            )
 
-        runtime = build_runtime()
-        session = AgentSession(
-            task_id=task_id,
-            user_prompt=prompt,
+        try:
+            capabilities_dict = json.loads(capabilities) if capabilities else {}
+            if not isinstance(capabilities_dict, dict):
+                capabilities_dict = {}
+        except Exception:
+            capabilities_dict = {}
+
+        file_resolver = build_file_resolver(file_infos)
+        runtime = AgentRuntime(file_resolver=file_resolver)
+
+        result = runtime.run(
+            user_request=prompt,
             files=file_infos,
+            capabilities=capabilities_dict,
         )
-        result = runtime.run(session)
-
-        return AgentResponse(
-            success=True,
-            answer=result.answer,
-            output_files=result.output_files,
-            tool_trace=result.tool_trace,
+        return AgentRunResponse(
+            success=result["success"],
+            answer=extract_answer(result),
+            result=result,
         )
     except Exception as e:
-        detail = str(e).strip()
-        if not detail:
-            detail = repr(e)
-        return AgentResponse(
+        error_result = {
+            "success": False,
+            "error": str(e),
+            "summary": {"success": False, "summary": "运行失败", "issues": [str(e)]},
+        }
+        return AgentRunResponse(
             success=False,
-            answer="",
-            error=detail,
+            answer=extract_answer(error_result),
+            result=error_result,
         )
+
+
+@router.post("/agent/run_json", response_model=AgentRunResponse)
+def run_agent_json(payload: AgentRunRequest) -> AgentRunResponse:
+    file_resolver = build_file_resolver(payload.files)
+    runtime = AgentRuntime(file_resolver=file_resolver)
+
+    result = runtime.run(
+        user_request=payload.user_request,
+        files=payload.files,
+        capabilities=payload.capabilities,
+    )
+    return AgentRunResponse(
+        success=result["success"],
+        answer=extract_answer(result),
+        result=result,
+    )

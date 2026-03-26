@@ -1,0 +1,26 @@
+from __future__ import annotations
+
+from app.document.service import DocumentService
+
+
+class DocumentServer:
+    def __init__(self) -> None:
+        self.document_service = DocumentService()
+
+    def read_document(self, file_path: str, filename: str | None = None, **kwargs):
+        return self.document_service.read(file_path=file_path, filename=filename, **kwargs)
+
+    def extract_structured_data(self, file_path: str, filename: str | None = None, **kwargs):
+        return self.document_service.extract(file_path=file_path, filename=filename, **kwargs)
+
+    def fill_fields(self, file_path: str, filename: str | None = None, **kwargs):
+        return self.document_service.fill(file_path=file_path, filename=filename, **kwargs)
+
+    def update_table(self, file_path: str, filename: str | None = None, **kwargs):
+        return self.document_service.update_table(file_path=file_path, filename=filename, **kwargs)
+
+    def validate_document(self, file_path: str, filename: str | None = None, **kwargs):
+        return self.document_service.validate(file_path=file_path, filename=filename, **kwargs)
+
+    def scan_template_fields(self, file_path: str, filename: str | None = None, **kwargs):
+        return self.document_service.scan_template(file_path=file_path, filename=filename, **kwargs)

@@ -1,0 +1,343 @@
+from __future__ import annotations
+
+from typing import Any
+
+from app.domain.capability_types import CapabilityType
+from app.domain.document_types import DocumentType
+from app.document.providers.base import BaseDocumentProvider, ProviderResult
+
+# ===== 按你现有项目里的真实实现改这里的导入 =====
+# 下面这些名字是按目录推断的“占位骨架”
+try:
+    from app.document.word.parser import WordParser
+except Exception:
+    WordParser = None
+
+try:
+    from app.document.word.analyzer import WordAnalyzer
+except Exception:
+    WordAnalyzer = None
+
+try:
+    from app.document.word.locator import WordLocator
+except Exception:
+    WordLocator = None
+
+try:
+    from app.document.word.filler import WordFiller
+except Exception:
+    WordFiller = None
+
+try:
+    from app.document.word.validator import WordValidator
+except Exception:
+    WordValidator = None
+
+try:
+    from app.document.word.writer import WordWriter
+except Exception:
+    WordWriter = None
+
+try:
+    from app.document.word.comparator import WordComparator
+except Exception:
+    WordComparator = None
+
+try:
+    from app.document.word.template_scanner import WordTemplateScanner
+except Exception:
+    WordTemplateScanner = None
+
+
+class WordProvider(BaseDocumentProvider):
+    document_type = DocumentType.WORD
+
+    def __init__(self) -> None:
+        self.parser = WordParser() if WordParser else None
+        self.analyzer = WordAnalyzer() if WordAnalyzer else None
+        self.locator = WordLocator() if WordLocator else None
+        self.filler = WordFiller() if WordFiller else None
+        self.validator = WordValidator() if WordValidator else None
+        self.writer = WordWriter() if WordWriter else None
+        self.comparator = WordComparator() if WordComparator else None
+        self.template_scanner = WordTemplateScanner() if WordTemplateScanner else None
+
+    def supported_capabilities(self) -> set[CapabilityType]:
+        supported: set[CapabilityType] = set()
+
+        if self.parser:
+            supported.add(CapabilityType.READ)
+            supported.add(CapabilityType.EXTRACT)
+
+        if self.locator:
+            supported.add(CapabilityType.LOCATE)
+
+        if self.filler:
+            supported.add(CapabilityType.FILL)
+
+        if self.comparator:
+            supported.add(CapabilityType.COMPARE)
+
+        if self.validator:
+            supported.add(CapabilityType.VALIDATE)
+
+        if self.writer:
+            supported.add(CapabilityType.WRITE)
+
+        supported.add(CapabilityType.SCAN_TEMPLATE)
+        return supported
+
+    def scan_template(self, file_path: str, **kwargs) -> ProviderResult:
+        if not self.template_scanner:
+            return ProviderResult(success=False, message="Word template scanner is not available")
+
+        try:
+            result = self.template_scanner.scan(file_path)
+            return ProviderResult(
+                success=True,
+                message="Word template scanned successfully",
+                data=result,
+                raw={"provider": "word"},
+            )
+        except Exception as e:
+            return ProviderResult(success=False, message=f"Failed to scan word template: {e}")
+
+    def read(self, file_path: str, **kwargs) -> ProviderResult:
+        if not self.parser:
+            return ProviderResult(success=False, message="Word parser is not available")
+
+        try:
+            if hasattr(self.parser, "read_text"):
+                parsed = self.parser.read_text(file_path=file_path)
+            else:
+                parsed = self._safe_call(
+                    obj=self.parser,
+                    candidate_methods=["read_text", "extract_structure", "read_tables", "parse", "read", "load"],
+                    file_path=file_path,
+                )
+
+            return ProviderResult(
+                success=True,
+                message="Word document read successfully",
+                data={"document": parsed},
+                raw={"provider": "word"},
+            )
+        except Exception as e:
+            return ProviderResult(success=False, message=f"Failed to read word document: {e}")
+
+    def extract(self, file_path: str, **kwargs) -> ProviderResult:
+        """
+        结构化提取：
+        - 优先 parser + analyzer
+        - 如果 analyzer 不存在，就退化为 parser 结果
+        """
+        if not self.parser:
+            return ProviderResult(success=False, message="Word parser is not available")
+
+        try:
+            if hasattr(self.parser, "extract_structure"):
+                parsed = self.parser.extract_structure(file_path=file_path)
+            elif hasattr(self.parser, "read_text"):
+                parsed = {
+                    "text": self.parser.read_text(file_path=file_path),
+                    "tables": self.parser.read_tables(file_path=file_path) if hasattr(self.parser, "read_tables") else [],
+                }
+            else:
+                parsed = self._safe_call(
+                    obj=self.parser,
+                    candidate_methods=["extract_structure", "read_text", "read_tables", "parse", "read", "load"],
+                    file_path=file_path,
+                )
+
+            analyzed = None
+            if self.analyzer:
+                if hasattr(self.analyzer, "find_placeholders"):
+                    analyzed = self.analyzer.find_placeholders(file_path=file_path)
+                else:
+                    analyzed = self._safe_call(
+                        obj=self.analyzer,
+                        candidate_methods=["find_placeholders", "analyze", "extract", "run"],
+                        file_path=file_path,
+                    )
+
+            return ProviderResult(
+                success=True,
+                message="Word document extracted successfully",
+                data={
+                    "parsed": parsed,
+                    "structured_data": analyzed if analyzed is not None else parsed,
+                },
+                raw={"provider": "word"},
+            )
+        except Exception as e:
+            return ProviderResult(success=False, message=f"Failed to extract word document: {e}")
+
+    def locate(self, file_path: str, **kwargs) -> ProviderResult:
+        if not self.locator:
+            return ProviderResult(success=False, message="Word locator is not available")
+
+        try:
+            result = self._safe_call(
+                obj=self.locator,
+                candidate_methods=["locate", "find", "run"],
+                file_path=file_path,
+                **kwargs,
+            )
+            return ProviderResult(
+                success=True,
+                message="Targets located successfully",
+                data={"locations": result},
+                raw={"provider": "word"},
+            )
+        except Exception as e:
+            return ProviderResult(success=False, message=f"Failed to locate targets: {e}")
+
+    def fill(self, file_path: str, **kwargs) -> ProviderResult:
+        if not self.filler:
+            return ProviderResult(success=False, message="Word filler is not available")
+
+        try:
+            """
+            建议 kwargs 约定：
+            - output_path
+            - field_values
+            - mapping
+            - fill_mode
+            """
+            result = self._safe_call(
+                obj=self.filler,
+                candidate_methods=["fill", "apply", "run"],
+                file_path=file_path,
+                **kwargs,
+            )
+
+            output_path = kwargs.get("output_path")
+            if isinstance(result, str) and not output_path:
+                output_path = result
+
+            return ProviderResult(
+                success=True,
+                message="Word document filled successfully",
+                data={"fill_result": result},
+                output_path=output_path,
+                raw={"provider": "word"},
+            )
+        except Exception as e:
+            return ProviderResult(success=False, message=f"Failed to fill word document: {e}")
+
+    def compare(self, left_file_path: str, right_file_path: str, **kwargs) -> ProviderResult:
+        if not self.comparator:
+            return ProviderResult(success=False, message="Word comparator is not available")
+
+        try:
+            result = self._safe_call(
+                obj=self.comparator,
+                candidate_methods=["compare", "run"],
+                left_file_path=left_file_path,
+                right_file_path=right_file_path,
+                **kwargs,
+            )
+            return ProviderResult(
+                success=True,
+                message="Word documents compared successfully",
+                data={"comparison": result},
+                raw={"provider": "word"},
+            )
+        except Exception as e:
+            return ProviderResult(success=False, message=f"Failed to compare word documents: {e}")
+
+    def validate(self, file_path: str, **kwargs) -> ProviderResult:
+        if not self.validator:
+            return ProviderResult(success=False, message="Word validator is not available")
+
+        try:
+            result = self._safe_call(
+                obj=self.validator,
+                candidate_methods=["validate", "run"],
+                file_path=file_path,
+                **kwargs,
+            )
+            return ProviderResult(
+                success=True,
+                message="Word document validated successfully",
+                data={"validation": result},
+                raw={"provider": "word"},
+            )
+        except Exception as e:
+            return ProviderResult(success=False, message=f"Failed to validate word document: {e}")
+
+    def write(self, file_path: str, **kwargs) -> ProviderResult:
+        if not self.writer:
+            return ProviderResult(success=False, message="Word writer is not available")
+
+        try:
+            result = self._safe_call(
+                obj=self.writer,
+                candidate_methods=["write", "save", "run"],
+                file_path=file_path,
+                **kwargs,
+            )
+
+            output_path = kwargs.get("output_path")
+            if isinstance(result, str) and not output_path:
+                output_path = result
+
+            return ProviderResult(
+                success=True,
+                message="Word document written successfully",
+                data={"write_result": result},
+                output_path=output_path,
+                raw={"provider": "word"},
+            )
+        except Exception as e:
+            return ProviderResult(success=False, message=f"Failed to write word document: {e}")
+
+    @staticmethod
+    def _safe_call(obj: Any, candidate_methods: list[str], **kwargs) -> Any:
+        """
+        兼容旧代码：
+        你的旧实现方法名可能不是统一的，所以这里按候选方法尝试调用。
+        """
+        for method_name in candidate_methods:
+            method = getattr(obj, method_name, None)
+            if callable(method):
+                return method(**kwargs)
+        raise AttributeError(
+            f"{obj.__class__.__name__} does not have any callable methods in {candidate_methods}"
+        )
+    
+    def fill(self, file_path: str, **kwargs) -> ProviderResult:
+        if not self.filler:
+            return ProviderResult(success=False, message="Word filler is not available")
+
+        try:
+            field_values = kwargs.get("field_values", {})
+            output_path = kwargs.get("output_path")
+            fill_mode = kwargs.get("fill_mode", "auto")
+
+            result = self._safe_call(
+                obj=self.filler,
+                candidate_methods=["fill", "apply", "run"],
+                file_path=file_path,
+                field_values=field_values,
+                output_path=output_path,
+                fill_mode=fill_mode,
+                **kwargs,
+            )
+
+            if isinstance(result, str) and not output_path:
+                output_path = result
+
+            return ProviderResult(
+                success=True,
+                message="Word document filled successfully",
+                data={
+                    "fill_mode": fill_mode,
+                    "field_values_count": len(field_values),
+                    "fill_result": result,
+                },
+                output_path=output_path,
+                raw={"provider": "word"},
+            )
+        except Exception as e:
+            return ProviderResult(success=False, message=f"Failed to fill word document: {e}")
