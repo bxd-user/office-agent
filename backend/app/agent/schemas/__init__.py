@@ -2,6 +2,7 @@ from app.agent.schemas.action import ActionStep, ActionObservation, ExecutionArt
 from app.agent.schemas.execution import ExecutionState
 from app.agent.schemas.observation import Observation
 from app.agent.schemas.plan import ExecutionPlan, FileRole, PlanStep, StepExecutionRecord
+from app.agent.schemas.result import AgentRunResult
 
 __all__ = [
     "ActionStep",
@@ -10,6 +11,7 @@ __all__ = [
     "ActionPlan",
     "Observation",
     "ExecutionState",
+    "AgentRunResult",
     "FileRole",
     "PlanStep",
     "ExecutionPlan",

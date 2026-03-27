@@ -140,10 +140,17 @@ class ExcelProvider(BaseDocumentProvider):
             if text is not None:
                 matches: list[dict[str, Any]] = []
                 target = str(text).strip()
+                partial = bool(kwargs.get("partial_match", False))
+                case_sensitive = bool(kwargs.get("case_sensitive", False))
+
+                cmp_target = target if case_sensitive else target.lower()
+
                 for row in ws.iter_rows():
                     for cell in row:
-                        value = "" if cell.value is None else str(cell.value).strip()
-                        if value == target:
+                        cell_str = "" if cell.value is None else str(cell.value).strip()
+                        cmp_cell = cell_str if case_sensitive else cell_str.lower()
+                        hit = (cmp_target in cmp_cell) if partial else (cmp_target == cmp_cell)
+                        if hit:
                             matches.append(
                                 {
                                     "coordinate": cell.coordinate,
@@ -158,6 +165,8 @@ class ExcelProvider(BaseDocumentProvider):
                     data={
                         "sheet_name": sheet_name,
                         "text": text,
+                        "partial_match": partial,
+                        "case_sensitive": case_sensitive,
                         "matches": matches,
                     },
                     raw={"provider": "excel"},
@@ -212,9 +221,50 @@ class ExcelProvider(BaseDocumentProvider):
 
     def update_table(self, file_path: str, **kwargs) -> ProviderResult:
         """
-        当前先复用 fill，后面再扩复杂表格操作。
+        按表头追加行，支持两种模式：
+        - append_by_header: 传入 headers + rows(list[dict])，自动定位表尾追加
+        - 其余参数：退化为 fill()
+
+        params:
+        - headers    : list[str]       — 表头列表（用于定位表格）
+        - rows       : list[dict]      — 每行数据，key 为表头名
+        - sheet_name : str             — 可选，指定 sheet
+        - output_path: str             — 输出路径
         """
-        return self.fill(file_path=file_path, **kwargs)
+        headers: list[str] | None = kwargs.get("headers")
+        rows: list[dict] | None = kwargs.get("rows")
+
+        if not headers or not rows:
+            # 无表头模式：退化为 fill
+            return self.fill(file_path=file_path, **kwargs)
+
+        try:
+            workbook = self.adapter.load(file_path)
+            output_path = kwargs.get("output_path") or self._default_output_path(file_path)
+            sheet_name = kwargs.get("sheet_name")
+            ws = self.adapter.get_sheet(workbook, sheet_name)
+
+            written = self.adapter.append_rows_by_header(ws, headers, rows)
+            if written == 0:
+                return ProviderResult(
+                    success=False,
+                    message=f"Headers not found in sheet '{ws.title}': {headers}",
+                )
+
+            saved = self.adapter.save(workbook, output_path)
+            return ProviderResult(
+                success=True,
+                message=f"Appended {written} row(s) to table in '{ws.title}'",
+                data={
+                    "sheet_name": ws.title,
+                    "headers": headers,
+                    "rows_appended": written,
+                },
+                output_path=saved,
+                raw={"provider": "excel"},
+            )
+        except Exception as e:
+            return ProviderResult(success=False, message=f"Failed to update table: {e}")
 
     def validate(self, file_path: str, **kwargs) -> ProviderResult:
         try:

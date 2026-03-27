@@ -1,7 +1,3 @@
-from abc import ABC, abstractmethod
+from app.document.shared.base import BaseSelector
 
-
-class BaseSelector(ABC):
-    @abstractmethod
-    def select(self, file_path: str):
-        raise NotImplementedError
+__all__ = ["BaseSelector"]

@@ -1,44 +1,312 @@
 from __future__ import annotations
 
+from typing import Any
+
 from app.agent.routing.capability_registry import get_capability_registry
+from app.domain.capability_types import CapabilityType
 from app.domain.document_types import detect_document_type
+from app.document.exceptions import CapabilityNotSupported, DocumentProviderError, DocumentServiceError
+from app.document.providers.base import ProviderResult
+from app.document.router import DocumentRouter
 
 
 class DocumentService:
     def __init__(self) -> None:
         self.registry = get_capability_registry()
+        self.router = DocumentRouter()
 
+    # ===== 统一 capability 接口（推荐） =====
+    def read_document(self, file_path: str, filename: str | None = None, **kwargs) -> ProviderResult:
+        return self._call_single(
+            capability=CapabilityType.READ,
+            method_name="read",
+            file_path=file_path,
+            filename=filename,
+            params=kwargs,
+        )
+
+    def extract_fields(self, file_path: str, filename: str | None = None, **kwargs) -> ProviderResult:
+        return self._call_single(
+            capability=CapabilityType.EXTRACT,
+            method_name="extract",
+            file_path=file_path,
+            filename=filename,
+            params=kwargs,
+        )
+
+    def locate_targets(self, file_path: str, filename: str | None = None, **kwargs) -> ProviderResult:
+        return self._call_single(
+            capability=CapabilityType.LOCATE,
+            method_name="locate",
+            file_path=file_path,
+            filename=filename,
+            params=kwargs,
+        )
+
+    def fill_document(self, file_path: str, filename: str | None = None, **kwargs) -> ProviderResult:
+        return self._call_single(
+            capability=CapabilityType.FILL,
+            method_name="fill",
+            file_path=file_path,
+            filename=filename,
+            params=kwargs,
+        )
+
+    def compare_documents(
+        self,
+        left_file_path: str | None = None,
+        right_file_path: str | None = None,
+        file_paths: list[str] | None = None,
+        filename: str | None = None,
+        **kwargs,
+    ) -> ProviderResult:
+        paths = list(file_paths or [])
+        if left_file_path:
+            paths.insert(0, left_file_path)
+        if right_file_path:
+            paths.append(right_file_path)
+
+        if len(paths) < 2:
+            raise DocumentServiceError("compare_documents requires at least two file paths")
+
+        left = paths[0]
+        right = paths[1]
+
+        capability = CapabilityType.COMPARE
+        route = self.router.route_by_capability(
+            capability=capability,
+            file_paths=[left, right],
+            filename=filename,
+            mode="multi",
+        )
+        doc_type = route.document_type
+        provider = route.provider
+
+        result = self._invoke_provider(
+            provider=provider,
+            method_name="compare",
+            call_kwargs={
+                "left_file_path": left,
+                "right_file_path": right,
+                **kwargs,
+            },
+            capability=capability,
+        )
+        return self._normalize_result(
+            result=result,
+            capability=capability.value,
+            mode="multi",
+            doc_type=doc_type.value,
+            file_paths=[left, right],
+        )
+
+    def validate_document(self, file_path: str, filename: str | None = None, **kwargs) -> ProviderResult:
+        return self._call_single(
+            capability=CapabilityType.VALIDATE,
+            method_name="validate",
+            file_path=file_path,
+            filename=filename,
+            params=kwargs,
+        )
+
+    def write_document(self, file_path: str, filename: str | None = None, **kwargs) -> ProviderResult:
+        return self._call_single(
+            capability=CapabilityType.WRITE,
+            method_name="write",
+            file_path=file_path,
+            filename=filename,
+            params=kwargs,
+        )
+
+    def summarize_document(
+        self,
+        file_path: str | None = None,
+        file_paths: list[str] | None = None,
+        filename: str | None = None,
+        **kwargs,
+    ) -> ProviderResult:
+        paths = list(file_paths or [])
+        if file_path:
+            paths.insert(0, file_path)
+        if not paths:
+            raise DocumentServiceError("summarize_document requires file_path or file_paths")
+
+        summaries: list[dict[str, Any]] = []
+        full_text_parts: list[str] = []
+
+        for idx, path in enumerate(paths):
+            read_result = self.read_document(file_path=path, filename=filename, **kwargs)
+            if not read_result.success:
+                return self._normalize_result(
+                    result=read_result,
+                    capability=CapabilityType.SUMMARIZE.value,
+                    mode="multi" if len(paths) > 1 else "single",
+                    doc_type="mixed" if len(paths) > 1 else detect_document_type(filename=filename or path).value,
+                    file_paths=paths,
+                )
+
+            data = read_result.data if isinstance(read_result.data, dict) else {}
+            preview = ""
+            for key in ("preview", "text", "full_text"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    preview = value.strip()
+                    break
+
+            if not preview:
+                preview = str(data)[:2000]
+
+            short = " ".join(preview.split())[:300]
+            full_text_parts.append(short)
+            summaries.append(
+                {
+                    "index": idx,
+                    "file_path": path,
+                    "summary": short,
+                }
+            )
+
+        merged = "\n".join(item["summary"] for item in summaries if item.get("summary"))
+        summary_text = merged[:2000]
+
+        return ProviderResult(
+            success=True,
+            message="Document summary generated",
+            data={
+                "summary": summary_text,
+                "items": summaries,
+                "file_count": len(paths),
+                "_service": {
+                    "capability": CapabilityType.SUMMARIZE.value,
+                    "mode": "multi" if len(paths) > 1 else "single",
+                    "document_type": "mixed" if len(paths) > 1 else detect_document_type(filename=filename or paths[0]).value,
+                    "file_paths": paths,
+                },
+            },
+            raw={"service": "document", "capability": CapabilityType.SUMMARIZE.value},
+        )
+
+    # ===== 兼容旧方法名 =====
     def read(self, file_path: str, filename: str | None = None, **kwargs):
-        doc_type = detect_document_type(filename=filename or file_path)
-        provider = self.registry.require_provider(doc_type)
-        return provider.read(file_path=file_path, **kwargs)
+        return self.read_document(file_path=file_path, filename=filename, **kwargs)
 
     def extract(self, file_path: str, filename: str | None = None, **kwargs):
-        doc_type = detect_document_type(filename=filename or file_path)
-        provider = self.registry.require_provider(doc_type)
-        return provider.extract(file_path=file_path, **kwargs)
+        return self.extract_fields(file_path=file_path, filename=filename, **kwargs)
 
     def locate(self, file_path: str, filename: str | None = None, **kwargs):
-        doc_type = detect_document_type(filename=filename or file_path)
-        provider = self.registry.require_provider(doc_type)
-        return provider.locate(file_path=file_path, **kwargs)
+        return self.locate_targets(file_path=file_path, filename=filename, **kwargs)
 
     def fill(self, file_path: str, filename: str | None = None, **kwargs):
-        doc_type = detect_document_type(filename=filename or file_path)
-        provider = self.registry.require_provider(doc_type)
-        return provider.fill(file_path=file_path, **kwargs)
+        return self.fill_document(file_path=file_path, filename=filename, **kwargs)
 
     def update_table(self, file_path: str, filename: str | None = None, **kwargs):
-        doc_type = detect_document_type(filename=filename or file_path)
-        provider = self.registry.require_provider(doc_type)
-        return provider.update_table(file_path=file_path, **kwargs)
+        return self._call_single(
+            capability=CapabilityType.UPDATE_TABLE,
+            method_name="update_table",
+            file_path=file_path,
+            filename=filename,
+            params=kwargs,
+        )
 
     def validate(self, file_path: str, filename: str | None = None, **kwargs):
-        doc_type = detect_document_type(filename=filename or file_path)
-        provider = self.registry.require_provider(doc_type)
-        return provider.validate(file_path=file_path, **kwargs)
+        return self.validate_document(file_path=file_path, filename=filename, **kwargs)
+
+    def write(self, file_path: str, filename: str | None = None, **kwargs):
+        return self.write_document(file_path=file_path, filename=filename, **kwargs)
 
     def scan_template(self, file_path: str, filename: str | None = None, **kwargs):
-        doc_type = detect_document_type(filename=filename or file_path)
-        provider = self.registry.require_provider(doc_type)
-        return provider.scan_template(file_path=file_path, **kwargs)
+        return self._call_single(
+            capability=CapabilityType.SCAN_TEMPLATE,
+            method_name="scan_template",
+            file_path=file_path,
+            filename=filename,
+            params=kwargs,
+        )
+
+    def compare(
+        self,
+        left_file_path: str,
+        right_file_path: str,
+        filename: str | None = None,
+        **kwargs,
+    ):
+        return self.compare_documents(
+            left_file_path=left_file_path,
+            right_file_path=right_file_path,
+            filename=filename,
+            **kwargs,
+        )
+
+    # ===== 内部统一处理 =====
+    def _call_single(
+        self,
+        capability: CapabilityType,
+        method_name: str,
+        file_path: str,
+        filename: str | None,
+        params: dict[str, Any],
+    ) -> ProviderResult:
+        route = self.router.route_by_document_type(
+            file_path=file_path,
+            capability=capability,
+            filename=filename,
+        )
+        doc_type = route.document_type
+        provider = route.provider
+        result = self._invoke_provider(
+            provider=provider,
+            method_name=method_name,
+            call_kwargs={"file_path": file_path, **params},
+            capability=capability,
+        )
+        return self._normalize_result(
+            result=result,
+            capability=capability.value,
+            mode="single",
+            doc_type=doc_type.value,
+            file_paths=[file_path],
+        )
+
+    @staticmethod
+    def _invoke_provider(provider, method_name: str, call_kwargs: dict[str, Any], capability: CapabilityType) -> ProviderResult:
+        try:
+            method = getattr(provider, method_name)
+            result = method(**call_kwargs)
+            if isinstance(result, ProviderResult):
+                return result
+            return ProviderResult(
+                success=False,
+                message=f"Invalid provider response for capability '{capability.value}'",
+                raw={"provider_response_type": type(result).__name__},
+            )
+        except Exception as exc:
+            raise DocumentProviderError(
+                f"Provider invocation failed for capability '{capability.value}'"
+            ) from exc
+
+    @staticmethod
+    def _normalize_result(
+        result: ProviderResult,
+        capability: str,
+        mode: str,
+        doc_type: str,
+        file_paths: list[str],
+    ) -> ProviderResult:
+        data = dict(result.data)
+        data["_service"] = {
+            "capability": capability,
+            "mode": mode,
+            "document_type": doc_type,
+            "file_paths": file_paths,
+        }
+        raw = dict(result.raw)
+        raw["service"] = "document"
+        raw["capability"] = capability
+
+        return ProviderResult(
+            success=result.success,
+            message=result.message,
+            data=data,
+            output_path=result.output_path,
+            raw=raw,
+        )

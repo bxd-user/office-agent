@@ -1,6 +1,3 @@
-from app.document.selectors.base import BaseSelector
+from app.document.shared.selectors import ExcelSelector
 
-
-class ExcelSelector(BaseSelector):
-    def select(self, file_path: str):
-        raise NotImplementedError("ExcelSelector is not implemented yet.")
+__all__ = ["ExcelSelector"]

@@ -64,6 +64,59 @@ class ExcelAdapter(BaseDocumentAdapter):
                 return row_idx
         return None
 
+    def find_last_data_row(
+        self,
+        worksheet: Worksheet,
+        header_row: int,
+        key_col: int = 1,
+    ) -> int:
+        """从 header_row 向下扫描，返回最后一个非空数据行的行号。"""
+        last_row = header_row
+        for cell in worksheet.iter_rows(
+            min_row=header_row + 1,
+            min_col=key_col,
+            max_col=key_col,
+            values_only=False,
+        ):
+            if cell[0].value not in (None, ""):
+                last_row = cell[0].row
+        return last_row
+
+    def append_rows_by_header(
+        self,
+        worksheet: Worksheet,
+        expected_headers: list[str],
+        rows: list[dict],
+    ) -> int:
+        """
+        找到表头行，在表格末尾追加数据行。
+        rows: list of dicts keyed by header name.
+        返回写入行数。
+        """
+        header_row = self.find_header_row(worksheet, expected_headers)
+        if header_row is None:
+            return 0
+
+        # 建立表头→列索引映射
+        header_map: dict[str, int] = {}
+        for cell in worksheet[header_row]:
+            value = "" if cell.value is None else str(cell.value).strip()
+            if value in expected_headers:
+                header_map[value] = cell.column
+
+        last_row = self.find_last_data_row(worksheet, header_row)
+        start_row = last_row + 1
+
+        for r_offset, record in enumerate(rows):
+            for header, col_idx in header_map.items():
+                worksheet.cell(
+                    row=start_row + r_offset,
+                    column=col_idx,
+                    value=record.get(header),
+                )
+
+        return len(rows)
+
     def extract_table_by_header(
         self,
         worksheet: Worksheet,

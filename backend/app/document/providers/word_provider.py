@@ -6,8 +6,6 @@ from app.domain.capability_types import CapabilityType
 from app.domain.document_types import DocumentType
 from app.document.providers.base import BaseDocumentProvider, ProviderResult
 
-# ===== 按你现有项目里的真实实现改这里的导入 =====
-# 下面这些名字是按目录推断的“占位骨架”
 try:
     from app.document.word.parser import WordParser
 except Exception:
@@ -84,7 +82,9 @@ class WordProvider(BaseDocumentProvider):
         if self.writer:
             supported.add(CapabilityType.WRITE)
 
-        supported.add(CapabilityType.SCAN_TEMPLATE)
+        if self.template_scanner:
+            supported.add(CapabilityType.SCAN_TEMPLATE)
+
         return supported
 
     def scan_template(self, file_path: str, **kwargs) -> ProviderResult:
@@ -107,14 +107,11 @@ class WordProvider(BaseDocumentProvider):
             return ProviderResult(success=False, message="Word parser is not available")
 
         try:
-            if hasattr(self.parser, "read_text"):
-                parsed = self.parser.read_text(file_path=file_path)
-            else:
-                parsed = self._safe_call(
-                    obj=self.parser,
-                    candidate_methods=["read_text", "extract_structure", "read_tables", "parse", "read", "load"],
-                    file_path=file_path,
-                )
+            parsed = self._safe_call(
+                obj=self.parser,
+                candidate_methods=["read_text", "extract_structure", "read_tables", "parse", "read", "load"],
+                file_path=file_path,
+            )
 
             return ProviderResult(
                 success=True,
@@ -126,11 +123,6 @@ class WordProvider(BaseDocumentProvider):
             return ProviderResult(success=False, message=f"Failed to read word document: {e}")
 
     def extract(self, file_path: str, **kwargs) -> ProviderResult:
-        """
-        结构化提取：
-        - 优先 parser + analyzer
-        - 如果 analyzer 不存在，就退化为 parser 结果
-        """
         if not self.parser:
             return ProviderResult(success=False, message="Word parser is not available")
 
@@ -151,14 +143,11 @@ class WordProvider(BaseDocumentProvider):
 
             analyzed = None
             if self.analyzer:
-                if hasattr(self.analyzer, "find_placeholders"):
-                    analyzed = self.analyzer.find_placeholders(file_path=file_path)
-                else:
-                    analyzed = self._safe_call(
-                        obj=self.analyzer,
-                        candidate_methods=["find_placeholders", "analyze", "extract", "run"],
-                        file_path=file_path,
-                    )
+                analyzed = self._safe_call(
+                    obj=self.analyzer,
+                    candidate_methods=["find_placeholders", "analyze", "extract", "run"],
+                    file_path=file_path,
+                )
 
             return ProviderResult(
                 success=True,
@@ -197,28 +186,31 @@ class WordProvider(BaseDocumentProvider):
             return ProviderResult(success=False, message="Word filler is not available")
 
         try:
-            """
-            建议 kwargs 约定：
-            - output_path
-            - field_values
-            - mapping
-            - fill_mode
-            """
+            call_kwargs = dict(kwargs)
+            call_kwargs.setdefault("file_path", file_path)
+            if "field_values" in call_kwargs and "mapping" not in call_kwargs:
+                call_kwargs["mapping"] = call_kwargs["field_values"]
+
             result = self._safe_call(
                 obj=self.filler,
-                candidate_methods=["fill", "apply", "run"],
-                file_path=file_path,
-                **kwargs,
+                candidate_methods=["fill", "apply", "run", "write_kv_pairs_to_template"],
+                **call_kwargs,
             )
 
             output_path = kwargs.get("output_path")
+            if isinstance(result, dict) and not output_path:
+                output_path = result.get("output_path")
             if isinstance(result, str) and not output_path:
                 output_path = result
 
+            field_values = kwargs.get("field_values") or kwargs.get("mapping") or {}
             return ProviderResult(
                 success=True,
                 message="Word document filled successfully",
-                data={"fill_result": result},
+                data={
+                    "field_values_count": len(field_values) if isinstance(field_values, dict) else 0,
+                    "fill_result": result,
+                },
                 output_path=output_path,
                 raw={"provider": "word"},
             )
@@ -273,12 +265,14 @@ class WordProvider(BaseDocumentProvider):
         try:
             result = self._safe_call(
                 obj=self.writer,
-                candidate_methods=["write", "save", "run"],
+                candidate_methods=["write", "save", "run", "replace_text", "append_text"],
                 file_path=file_path,
                 **kwargs,
             )
 
             output_path = kwargs.get("output_path")
+            if isinstance(result, dict) and not output_path:
+                output_path = result.get("output_path")
             if isinstance(result, str) and not output_path:
                 output_path = result
 
@@ -294,10 +288,6 @@ class WordProvider(BaseDocumentProvider):
 
     @staticmethod
     def _safe_call(obj: Any, candidate_methods: list[str], **kwargs) -> Any:
-        """
-        兼容旧代码：
-        你的旧实现方法名可能不是统一的，所以这里按候选方法尝试调用。
-        """
         for method_name in candidate_methods:
             method = getattr(obj, method_name, None)
             if callable(method):
@@ -305,39 +295,3 @@ class WordProvider(BaseDocumentProvider):
         raise AttributeError(
             f"{obj.__class__.__name__} does not have any callable methods in {candidate_methods}"
         )
-    
-    def fill(self, file_path: str, **kwargs) -> ProviderResult:
-        if not self.filler:
-            return ProviderResult(success=False, message="Word filler is not available")
-
-        try:
-            field_values = kwargs.get("field_values", {})
-            output_path = kwargs.get("output_path")
-            fill_mode = kwargs.get("fill_mode", "auto")
-
-            result = self._safe_call(
-                obj=self.filler,
-                candidate_methods=["fill", "apply", "run"],
-                file_path=file_path,
-                field_values=field_values,
-                output_path=output_path,
-                fill_mode=fill_mode,
-                **kwargs,
-            )
-
-            if isinstance(result, str) and not output_path:
-                output_path = result
-
-            return ProviderResult(
-                success=True,
-                message="Word document filled successfully",
-                data={
-                    "fill_mode": fill_mode,
-                    "field_values_count": len(field_values),
-                    "fill_result": result,
-                },
-                output_path=output_path,
-                raw={"provider": "word"},
-            )
-        except Exception as e:
-            return ProviderResult(success=False, message=f"Failed to fill word document: {e}")

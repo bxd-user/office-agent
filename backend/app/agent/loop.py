@@ -44,7 +44,7 @@ class AgentLoop:
 
             last_observations = [obs.model_dump() for obs in observations]
             last_context = executor.export_context()
-            last_trace = executor.export_trace()
+            last_trace = executor.export_trace_dict()
 
             failed = next((obs for obs in observations if not obs.success), None)
             if failed is None:

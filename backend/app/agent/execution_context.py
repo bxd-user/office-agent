@@ -35,6 +35,13 @@ class ExecutionContext:
 
     def export_debug_dict(self) -> dict[str, Any]:
         return {
+            "state": {
+                "current_step_id": self.state.current_step_id,
+                "status": self.state.status,
+                "error": self.state.error,
+                "retry_count": dict(self.state.retry_count),
+                "intermediate_refs": dict(self.state.intermediate_refs),
+            },
             "observations": {k: v.model_dump() for k, v in self.state.observations.items()},
             "artifacts": {k: v.model_dump() for k, v in self.state.artifacts.items()},
         }

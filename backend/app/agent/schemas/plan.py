@@ -16,8 +16,16 @@ class PlanStep(BaseModel):
     step_id: str
     title: str
     objective: str
+    action: str = ""
+    capability: str = ""
+    depends_on: list[str] = Field(default_factory=list)
     suggested_tools: list[str] = Field(default_factory=list)
     inputs: dict = Field(default_factory=dict)
+    outputs: dict = Field(default_factory=dict)
+    input_declarations: dict = Field(default_factory=dict)
+    output_declarations: dict = Field(default_factory=dict)
+    need_validation: bool = False
+    allow_degraded_execution: bool = False
     expected_outputs: list[str] = Field(default_factory=list)
     status: str = "pending"
     notes: str = ""
@@ -34,7 +42,13 @@ class StepExecutionRecord(BaseModel):
 
 class ExecutionPlan(BaseModel):
     goal: str = ""
+    global_objective: str = ""
     task_type: str = "unknown"
+    dependency_graph: dict[str, list[str]] = Field(default_factory=dict)
+    input_declarations: dict = Field(default_factory=dict)
+    output_declarations: dict = Field(default_factory=dict)
+    requires_validation: bool = False
+    allow_degraded_execution: bool = False
     file_roles: list[FileRole] = Field(default_factory=list)
     steps: list[PlanStep] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
@@ -43,4 +57,10 @@ class ExecutionPlan(BaseModel):
 
 
 class PlannerOutput(BaseModel):
+    goal: str = ""
+    task_type: str = "unknown"
+    input_declarations: dict = Field(default_factory=dict)
+    output_declarations: dict = Field(default_factory=dict)
+    requires_validation: bool = False
+    allow_degraded_execution: bool = False
     steps: list[ActionStep] = Field(default_factory=list)

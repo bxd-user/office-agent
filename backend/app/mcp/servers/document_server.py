@@ -7,6 +7,20 @@ class DocumentServer:
     def __init__(self) -> None:
         self.document_service = DocumentService()
 
+    def summarize_document(
+        self,
+        file_path: str | None = None,
+        file_paths: list[str] | None = None,
+        filename: str | None = None,
+        **kwargs,
+    ):
+        return self.document_service.summarize_document(
+            file_path=file_path,
+            file_paths=file_paths,
+            filename=filename,
+            **kwargs,
+        )
+
     def read_document(self, file_path: str, filename: str | None = None, **kwargs):
         return self.document_service.read(file_path=file_path, filename=filename, **kwargs)
 
