@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from copy import deepcopy
 import os
+from typing import Any
+
 from docx import Document
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
+
+from app.document.word.models import WriteOutputMeta
 
 
 class WordWriter:
@@ -49,35 +53,78 @@ class WordWriter:
         if src.font.color is not None:
             dst.font.color.rgb = src.font.color.rgb
 
-        src_rpr = src._element.rPr
-        if src_rpr is not None:
-            dst._element.rPr = deepcopy(src_rpr)
-
-    def replace_text(self, file_path: str, replacements: dict[str, str], output_path: str):
+    def replace_text(
+        self,
+        file_path: str,
+        replacements: dict[str, str],
+        output_path: str | None = None,
+        output_dir: str | None = None,
+        filename_prefix: str | None = None,
+        filename_suffix: str = "_written",
+        avoid_overwrite: bool = True,
+    ):
         doc = Document(file_path)
+        replaced_count = 0
 
         for p in doc.paragraphs:
             for old, new in replacements.items():
                 if old in p.text:
+                    before = p.text
                     for run in p.runs:
                         run.text = run.text.replace(old, new)
+                    if p.text != before:
+                        replaced_count += 1
 
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
                     for old, new in replacements.items():
                         if old in cell.text:
+                            before = cell.text
                             cell.text = cell.text.replace(old, new)
+                            if cell.text != before:
+                                replaced_count += 1
 
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        doc.save(output_path)
+        resolved_output_path, avoided = self._resolve_output_path(
+            source_file_path=file_path,
+            output_path=output_path,
+            output_dir=output_dir,
+            filename_prefix=filename_prefix,
+            filename_suffix=filename_suffix,
+            avoid_overwrite=avoid_overwrite,
+        )
+
+        os.makedirs(os.path.dirname(resolved_output_path), exist_ok=True)
+        doc.save(resolved_output_path)
+
+        meta = WriteOutputMeta(
+            source_file=file_path,
+            output_file=resolved_output_path,
+            output_dir=os.path.dirname(resolved_output_path),
+            output_filename=os.path.basename(resolved_output_path),
+            operation="replace_text",
+            avoided_overwrite=avoided,
+            replaced_count=replaced_count,
+            appended=False,
+        )
 
         return {
-            "output_path": output_path,
+            "output_path": resolved_output_path,
             "replacements_count": len(replacements),
+            "effective_replaced_blocks": replaced_count,
+            "meta": self._model_to_dict(meta),
         }
 
-    def append_text(self, file_path: str, append_text: str, output_path: str):
+    def append_text(
+        self,
+        file_path: str,
+        append_text: str,
+        output_path: str | None = None,
+        output_dir: str | None = None,
+        filename_prefix: str | None = None,
+        filename_suffix: str = "_written",
+        avoid_overwrite: bool = True,
+    ):
         doc = Document(file_path)
 
         text = (append_text or "").strip()
@@ -92,13 +139,124 @@ class WordWriter:
             if reference_run is not None:
                 self._copy_run_style(reference_run, new_run)
 
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        doc.save(output_path)
+        resolved_output_path, avoided = self._resolve_output_path(
+            source_file_path=file_path,
+            output_path=output_path,
+            output_dir=output_dir,
+            filename_prefix=filename_prefix,
+            filename_suffix=filename_suffix,
+            avoid_overwrite=avoid_overwrite,
+        )
+
+        os.makedirs(os.path.dirname(resolved_output_path), exist_ok=True)
+        doc.save(resolved_output_path)
+
+        meta = WriteOutputMeta(
+            source_file=file_path,
+            output_file=resolved_output_path,
+            output_dir=os.path.dirname(resolved_output_path),
+            output_filename=os.path.basename(resolved_output_path),
+            operation="append_text",
+            avoided_overwrite=avoided,
+            replaced_count=0,
+            appended=bool(text),
+        )
 
         return {
-            "output_path": output_path,
+            "output_path": resolved_output_path,
             "appended": bool(text),
+            "meta": self._model_to_dict(meta),
         }
+
+    def save_as_result(
+        self,
+        file_path: str,
+        output_path: str | None = None,
+        output_dir: str | None = None,
+        filename_prefix: str | None = None,
+        filename_suffix: str = "_result",
+        avoid_overwrite: bool = True,
+    ) -> dict[str, Any]:
+        doc = Document(file_path)
+        resolved_output_path, avoided = self._resolve_output_path(
+            source_file_path=file_path,
+            output_path=output_path,
+            output_dir=output_dir,
+            filename_prefix=filename_prefix,
+            filename_suffix=filename_suffix,
+            avoid_overwrite=avoid_overwrite,
+        )
+
+        os.makedirs(os.path.dirname(resolved_output_path), exist_ok=True)
+        doc.save(resolved_output_path)
+
+        meta = WriteOutputMeta(
+            source_file=file_path,
+            output_file=resolved_output_path,
+            output_dir=os.path.dirname(resolved_output_path),
+            output_filename=os.path.basename(resolved_output_path),
+            operation="save_as",
+            avoided_overwrite=avoided,
+            replaced_count=0,
+            appended=False,
+        )
+        return {
+            "output_path": resolved_output_path,
+            "saved": True,
+            "meta": self._model_to_dict(meta),
+        }
+
+    def _resolve_output_path(
+        self,
+        source_file_path: str,
+        output_path: str | None,
+        output_dir: str | None,
+        filename_prefix: str | None,
+        filename_suffix: str,
+        avoid_overwrite: bool,
+    ) -> tuple[str, bool]:
+        source_abs = os.path.abspath(source_file_path)
+        source_dir = os.path.dirname(source_abs)
+        source_name = os.path.basename(source_abs)
+        source_stem, source_ext = os.path.splitext(source_name)
+
+        target_dir = output_dir or os.path.join(source_dir, "outputs")
+        if output_path:
+            candidate = os.path.abspath(output_path)
+        else:
+            prefix = f"{filename_prefix}_" if filename_prefix else ""
+            filename = f"{prefix}{source_stem}{filename_suffix}{source_ext}"
+            candidate = os.path.abspath(os.path.join(target_dir, filename))
+
+        avoided = False
+        if avoid_overwrite and (os.path.abspath(candidate) == source_abs or os.path.exists(candidate)):
+            candidate = self._next_available_path(candidate)
+            avoided = True
+
+        # 确保不是原文件
+        if os.path.abspath(candidate) == source_abs:
+            candidate = self._next_available_path(candidate)
+            avoided = True
+
+        return candidate, avoided
+
+    @staticmethod
+    def _next_available_path(path: str) -> str:
+        base, ext = os.path.splitext(path)
+        index = 1
+        candidate = f"{base}_{index}{ext}"
+        while os.path.exists(candidate):
+            index += 1
+            candidate = f"{base}_{index}{ext}"
+        return candidate
+
+    @staticmethod
+    def _model_to_dict(model: Any) -> dict[str, Any]:
+        if hasattr(model, "model_dump"):
+            return model.model_dump()
+        if hasattr(model, "dict"):
+            return model.dict()
+        return dict(model)
 
 
 DocxWriter = WordWriter

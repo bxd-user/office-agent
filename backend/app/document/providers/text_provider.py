@@ -15,12 +15,6 @@ class TextProvider(BaseDocumentProvider):
 
     document_type = DocumentType.TEXT
 
-    _PLACEHOLDER_PATTERNS = [
-        re.compile(r"\{\{\s*([^{}\n]+?)\s*\}\}"),
-        re.compile(r"<<\s*([^<>\n]+?)\s*>>"),
-        re.compile(r"【\s*([^【】\n]+?)\s*】"),
-    ]
-
     def supported_capabilities(self) -> set[CapabilityType]:
         return {
             CapabilityType.READ,
@@ -71,7 +65,7 @@ class TextProvider(BaseDocumentProvider):
                             }
                         )
 
-            fields, occurrences = self._scan_fields(text)
+            fields, occurrences = self._scan_placeholders(text)
             return ProviderResult(
                 success=True,
                 message="Text structured data extracted successfully",
@@ -157,7 +151,7 @@ class TextProvider(BaseDocumentProvider):
         try:
             field_values: dict[str, Any] = kwargs.get("field_values", {})
             text = self._read_text(file_path)
-            replaced_text, replace_count = self._replace_fields(text, field_values)
+            replaced_text, replace_count = self._replace_placeholders_in_text(text, field_values)
 
             output_path = kwargs.get("output_path") or self._default_output_path(file_path, suffix="_filled")
             self._write_text(output_path, replaced_text)
@@ -255,7 +249,7 @@ class TextProvider(BaseDocumentProvider):
     def scan_template(self, file_path: str, **kwargs) -> ProviderResult:
         try:
             text = self._read_text(file_path)
-            fields, occurrences = self._scan_fields(text)
+            fields, occurrences = self._scan_placeholders(text)
             return ProviderResult(
                 success=True,
                 message="Text template scanned successfully",
@@ -285,42 +279,3 @@ class TextProvider(BaseDocumentProvider):
         path = Path(file_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
-
-    @classmethod
-    def _scan_fields(cls, text: str) -> tuple[list[str], list[dict[str, Any]]]:
-        fields: set[str] = set()
-        occurrences: list[dict[str, Any]] = []
-
-        for pattern in cls._PLACEHOLDER_PATTERNS:
-            for match in pattern.finditer(text):
-                field = match.group(1).strip()
-                fields.add(field)
-                occurrences.append(
-                    {
-                        "field": field,
-                        "start": match.start(),
-                        "end": match.end(),
-                        "matched": match.group(0),
-                    }
-                )
-
-        return sorted(fields), occurrences
-
-    @classmethod
-    def _replace_fields(cls, text: str, field_values: dict[str, Any]) -> tuple[str, int]:
-        replaced = text
-        replace_count = 0
-        for key, value in field_values.items():
-            value_str = str(value)
-            variants = [f"{{{{{key}}}}}", f"{{{key}}}", f"<<{key}>>", f"【{key}】"]
-            for token in variants:
-                count = replaced.count(token)
-                if count:
-                    replaced = replaced.replace(token, value_str)
-                    replace_count += count
-        return replaced, replace_count
-
-    @staticmethod
-    def _default_output_path(file_path: str, suffix: str) -> str:
-        base, ext = os.path.splitext(file_path)
-        return f"{base}{suffix}{ext}"

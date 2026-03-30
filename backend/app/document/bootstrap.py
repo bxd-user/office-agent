@@ -43,15 +43,6 @@ def _register_providers() -> None:
         registry.register_provider(provider)
 
 
-def _init_document_dependencies() -> None:
-    # 通过显式初始化确保 DocumentService / DocumentRouter 依赖链可用
-    from app.document.router import DocumentRouter
-    from app.document.service import DocumentService
-
-    DocumentRouter()
-    DocumentService()
-
-
 def bootstrap_document_providers() -> None:
     global _BOOTSTRAPPED
     if _BOOTSTRAPPED:
@@ -59,7 +50,6 @@ def bootstrap_document_providers() -> None:
 
     _register_capability_matrix()
     _register_providers()
-    _init_document_dependencies()
 
     _BOOTSTRAPPED = True
 

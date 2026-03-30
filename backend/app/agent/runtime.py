@@ -10,6 +10,8 @@ from app.agent.planner_v2 import PlannerV2
 from app.agent.replan import Replanner
 from app.agent.session import AgentSession
 from app.agent.verifier import Verifier
+from app.core.config import settings
+from app.core.logger import get_logger, log_event
 from app.document.bootstrap import bootstrap_document_providers
 
 
@@ -17,18 +19,22 @@ class AgentRuntime:
     def __init__(
         self,
         file_resolver,
-        max_replans: int = 2,
-        max_step_retries: int = 1,
+        max_replans: int | None = None,
+        max_step_retries: int | None = None,
     ) -> None:
         bootstrap_document_providers()
         self.file_resolver = file_resolver
-        self.max_replans = max(0, max_replans)
-        self.max_step_retries = max(0, max_step_retries)
+        self.max_replans = max(0, int(settings.AGENT_MAX_REPLANS if max_replans is None else max_replans))
+        self.max_step_retries = max(
+            0,
+            int(settings.AGENT_MAX_STEP_RETRIES if max_step_retries is None else max_step_retries),
+        )
 
         self.planner = PlannerV2()
         self.replanner = Replanner()
         self.verifier = Verifier()
         self.finalizer = Finalizer()
+        self.logger = get_logger("app.agent.runtime")
 
     def run(
         self,
@@ -40,10 +46,28 @@ class AgentRuntime:
         session = self._create_session(user_request=user_request, files=files)
         memory = self._init_memory(session=session)
 
+        log_event(
+            self.logger,
+            "runtime.start",
+            task_id=session.task_id,
+            user_prompt=user_request,
+            file_count=len(files),
+            max_replans=self.max_replans,
+            max_step_retries=self.max_step_retries,
+        )
+
         plan = self.planner.build_plan(
             user_request=user_request,
             files=files,
             capabilities=resolved_capabilities,
+        )
+
+        log_event(
+            self.logger,
+            "runtime.plan.ready",
+            task_id=session.task_id,
+            step_count=len(plan.steps),
+            steps=[step.action_type for step in plan.steps],
         )
 
         attempt = 0
@@ -72,9 +96,26 @@ class AgentRuntime:
                 context=last_context,
             )
 
+            log_event(
+                self.logger,
+                "runtime.iteration.summary",
+                task_id=session.task_id,
+                attempt=attempt,
+                replan_count=replan_count,
+                success=last_summary.get("success", False),
+                issues=last_summary.get("issues", []),
+            )
+
             self._sync_memory(memory=memory, context=last_context, observations=last_observations)
 
             if self._is_verified(last_observations, last_summary):
+                log_event(
+                    self.logger,
+                    "runtime.completed",
+                    task_id=session.task_id,
+                    success=True,
+                    replan_count=replan_count,
+                )
                 return self.finalizer.finalize_run(
                     success=True,
                     session=session,
@@ -89,6 +130,15 @@ class AgentRuntime:
 
             can_replan = attempt < self.max_replans and self._should_replan(last_observations, last_context)
             if not can_replan:
+                log_event(
+                    self.logger,
+                    "runtime.completed",
+                    task_id=session.task_id,
+                    success=False,
+                    replan_count=replan_count,
+                    reason="cannot_replan",
+                    issues=last_summary.get("issues", []),
+                )
                 return self.finalizer.finalize_run(
                     success=False,
                     session=session,
@@ -108,6 +158,14 @@ class AgentRuntime:
                 execution_trace=last_trace,
             )
             if not new_plan.steps:
+                log_event(
+                    self.logger,
+                    "runtime.completed",
+                    task_id=session.task_id,
+                    success=False,
+                    replan_count=replan_count,
+                    reason="replan_empty_steps",
+                )
                 return self.finalizer.finalize_run(
                     success=False,
                     session=session,
@@ -127,6 +185,14 @@ class AgentRuntime:
             plan = new_plan
             attempt += 1
             replan_count += 1
+            log_event(
+                self.logger,
+                "runtime.replanned",
+                task_id=session.task_id,
+                attempt=attempt,
+                replan_count=replan_count,
+                new_step_count=len(plan.steps),
+            )
 
     @staticmethod
     def _create_session(user_request: str, files: list[dict[str, Any]]) -> AgentSession:

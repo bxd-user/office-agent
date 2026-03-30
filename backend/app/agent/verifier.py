@@ -1,15 +1,18 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from typing import Any
 
 from app.agent.prompts import VALIDATION_SUMMARY_PROMPT
+from app.core.config import settings
 from app.core.llm_client import LLMClient, LLMClientError
+from app.core.logger import get_logger, log_event
 
 
 class Verifier:
     def __init__(self, llm_client: LLMClient | None = None) -> None:
         self.llm = llm_client or LLMClient()
+        self.logger = get_logger("app.agent.verifier")
 
     def summarize(
         self,
@@ -17,6 +20,15 @@ class Verifier:
         context: dict[str, Any],
     ) -> dict[str, Any]:
         deterministic = self._deterministic_summary(observations=observations, context=context)
+
+        if settings.ENABLE_VERIFIER_LOGS:
+            log_event(
+                self.logger,
+                "verifier.deterministic",
+                success=deterministic.get("success", False),
+                issues=deterministic.get("issues", []),
+                checks=deterministic.get("checks", {}),
+            )
 
         if not self.llm.enabled:
             return deterministic
@@ -31,10 +43,18 @@ class Verifier:
                 system_prompt=VALIDATION_SUMMARY_PROMPT,
                 user_prompt=json.dumps(payload, ensure_ascii=False, indent=2, default=str),
                 temperature=0.0,
+                metadata={"phase": "verifier.summarize"},
             )
             if isinstance(result, dict):
                 merged = dict(deterministic)
                 merged["llm_summary"] = result
+                if settings.ENABLE_VERIFIER_LOGS:
+                    log_event(
+                        self.logger,
+                        "verifier.final",
+                        success=merged.get("success", False),
+                        issues=merged.get("issues", []),
+                    )
                 return merged
             return deterministic
         except LLMClientError:
@@ -49,6 +69,7 @@ class Verifier:
         template_gaps = Verifier._collect_template_gaps(observations)
         output_files = Verifier._collect_output_files(observations, refs)
         empty_summaries = Verifier._collect_empty_summaries(observations)
+        output_required = Verifier._is_output_required(context)
 
         checks = {
             "execution_success": {
@@ -64,7 +85,8 @@ class Verifier:
                 "unfilled": template_gaps,
             },
             "output_generated": {
-                "passed": len(output_files) > 0,
+                "passed": (not output_required) or (len(output_files) > 0),
+                "required": output_required,
                 "files": output_files,
             },
             "summary_non_empty": {
@@ -75,18 +97,22 @@ class Verifier:
 
         issues: list[str] = []
         for failed in failed_steps:
-            issues.append(str(failed.get("message") or f"步骤失败: {failed.get('step_id') or 'unknown'}"))
+            issues.append(str(failed.get("message") or f"Step failed: {failed.get('step_id') or 'unknown'}"))
         if missing_fields:
-            issues.append("存在缺失字段，抽取结果不完整")
+            issues.append("Missing fields detected in extracted data.")
         if template_gaps:
-            issues.append("模板仍有未填充字段")
-        if not output_files:
-            issues.append("未生成输出文件")
+            issues.append("Template still has unfilled fields.")
+        if output_required and not output_files:
+            issues.append("Expected output file was not generated.")
         if empty_summaries:
-            issues.append("摘要结果为空")
+            issues.append("Summary output is empty.")
 
         success = all(bool(check.get("passed", False)) for check in checks.values())
-        summary_text = "任务执行完成且通过校验。" if success else "任务执行完成但校验未通过。"
+        summary_text = (
+            "Task execution completed and passed validation."
+            if success
+            else "Task execution completed but failed validation."
+        )
 
         return {
             "success": success,
@@ -100,6 +126,22 @@ class Verifier:
         state = context.get("state", {}) if isinstance(context, dict) else {}
         refs = state.get("intermediate_refs", {}) if isinstance(state, dict) else {}
         return refs if isinstance(refs, dict) else {}
+
+    @staticmethod
+    def _is_output_required(context: dict[str, Any]) -> bool:
+        refs = Verifier._extract_refs(context)
+        step_routing = refs.get("step_routing", {}) if isinstance(refs, dict) else {}
+        if not isinstance(step_routing, dict):
+            return False
+
+        output_actions = {"write", "create_output", "fill", "fill_fields", "update_table"}
+        for route in step_routing.values():
+            if not isinstance(route, dict):
+                continue
+            action_type = str(route.get("action_type") or route.get("capability") or "").strip().lower()
+            if action_type in output_actions:
+                return True
+        return False
 
     @staticmethod
     def _collect_missing_fields(extracted_fields: Any) -> list[str]:

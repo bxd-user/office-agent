@@ -106,7 +106,9 @@ class CapabilityResolver:
             multi_document_mode = True
 
         capability_enum = self._to_capability_enum(capability_name)
-        if capability_enum is not None:
+        # Auxiliary capabilities (for example summarize) are handled by local action handlers
+        # and should not be blocked by provider capability checks.
+        if capability_enum is not None and service_method is not None:
             for doc_type in unique_types:
                 self.resolve_provider(doc_type, capability_enum)
 
@@ -123,8 +125,13 @@ class CapabilityResolver:
         )
 
     def _normalize_capability_name(self, step: ActionStep) -> str:
-        raw = (step.capability or step.action_type or "").strip().lower()
-        return self._CAPABILITY_ALIAS.get(raw, raw)
+        raw = (step.capability or step.action_type or "").strip()
+        normalized = CapabilityType.normalize(raw)
+        if normalized:
+            return normalized
+
+        lowered = raw.lower()
+        return self._CAPABILITY_ALIAS.get(lowered, lowered)
 
     @staticmethod
     def _to_capability_enum(capability_name: str) -> CapabilityType | None:

@@ -3,6 +3,13 @@ from __future__ import annotations
 from enum import Enum
 
 
+def _normalize_key(value: str) -> str:
+    text = (value or "").strip().lower()
+    text = text.replace("-", "_")
+    text = text.replace(" ", "_")
+    return text
+
+
 class CapabilityType(str, Enum):
     READ = "read"
     EXTRACT = "extract"
@@ -14,3 +21,48 @@ class CapabilityType(str, Enum):
     VALIDATE = "validate"
     WRITE = "write"
     SCAN_TEMPLATE = "scan_template"
+
+    @classmethod
+    def aliases(cls) -> dict[str, "CapabilityType"]:
+        alias_map: dict[str, CapabilityType] = {}
+
+        for item in cls:
+            alias_map[_normalize_key(item.name)] = item
+            alias_map[_normalize_key(item.value)] = item
+
+        alias_map.update(
+            {
+                "read_doc": cls.READ,
+                "read_document": cls.READ,
+                "document_read": cls.READ,
+                "extract_fields": cls.EXTRACT,
+                "extract_structured_data": cls.EXTRACT,
+                "extract_content": cls.EXTRACT,
+                "locate_targets": cls.LOCATE,
+                "locate_target": cls.LOCATE,
+                "fill_fields": cls.FILL,
+                "fill_document": cls.FILL,
+                "compare_documents": cls.COMPARE,
+                "compare_document": cls.COMPARE,
+                "validate_output": cls.VALIDATE,
+                "validate_document": cls.VALIDATE,
+                "create_output": cls.WRITE,
+                "write_document": cls.WRITE,
+                "scan_template_fields": cls.SCAN_TEMPLATE,
+            }
+        )
+        return alias_map
+
+    @classmethod
+    def from_any(cls, value: str | "CapabilityType" | None) -> "CapabilityType" | None:
+        if isinstance(value, cls):
+            return value
+        if value is None:
+            return None
+        key = _normalize_key(str(value))
+        return cls.aliases().get(key)
+
+    @classmethod
+    def normalize(cls, value: str | "CapabilityType" | None) -> str | None:
+        item = cls.from_any(value)
+        return item.value if item else None

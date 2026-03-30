@@ -26,7 +26,11 @@ class Finalizer:
             "replan_count": replan_count,
         }
 
-        text_result = self._build_text_result(success=success, summary=summary)
+        text_result = self._build_text_result(
+            success=success,
+            summary=summary,
+            observations=observations,
+        )
         file_result = self._build_file_result(memory_snapshot=memory_snapshot, context=context)
         structured_result = self._build_structured_result(
             success=success,
@@ -100,7 +104,21 @@ class Finalizer:
         }
 
     @staticmethod
-    def _build_text_result(success: bool, summary: dict[str, Any]) -> str:
+    def _build_text_result(
+        success: bool,
+        summary: dict[str, Any],
+        observations: list[dict[str, Any]],
+    ) -> str:
+        for obs in reversed(observations):
+            if not isinstance(obs, dict):
+                continue
+            data = obs.get("data", {})
+            if not isinstance(data, dict):
+                continue
+            value = data.get("summary")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
         summary_text = str(summary.get("summary") or "").strip() if isinstance(summary, dict) else ""
         if summary_text:
             return summary_text

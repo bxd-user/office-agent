@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 from typing import Any
 
 from app.domain.capability_types import CapabilityType
@@ -18,12 +17,6 @@ except Exception:
 class PdfProvider(BaseDocumentProvider):
 
     document_type = DocumentType.PDF
-
-    _PLACEHOLDER_PATTERNS = [
-        re.compile(r"\{\{\s*([^{}\n]+?)\s*\}\}"),
-        re.compile(r"<<\s*([^<>\n]+?)\s*>>"),
-        re.compile(r"【\s*([^【】\n]+?)\s*】"),
-    ]
 
     def supported_capabilities(self) -> set[CapabilityType]:
         if not PdfReader:
@@ -237,17 +230,15 @@ class PdfProvider(BaseDocumentProvider):
 
             for page_idx, page in enumerate(reader.pages):
                 text = page.extract_text() or ""
-                for pattern in self._PLACEHOLDER_PATTERNS:
-                    for match in pattern.finditer(text):
-                        field = match.group(1).strip()
-                        fields.add(field)
-                        occurrences.append(
-                            {
-                                "page_index": page_idx,
-                                "field": field,
-                                "matched": match.group(0),
-                            }
-                        )
+                page_fields, page_occurrences = self._scan_placeholders(text)
+                fields.update(page_fields)
+                for item in page_occurrences:
+                    occurrences.append(
+                        {
+                            "page_index": page_idx,
+                            **item,
+                        }
+                    )
 
             return ProviderResult(
                 success=True,
@@ -261,8 +252,3 @@ class PdfProvider(BaseDocumentProvider):
             )
         except Exception as e:
             return ProviderResult(success=False, message=f"Failed to scan pdf template: {e}")
-
-    @staticmethod
-    def _default_output_path(file_path: str, suffix: str = "_filled") -> str:
-        base, ext = os.path.splitext(file_path)
-        return f"{base}{suffix}{ext}"

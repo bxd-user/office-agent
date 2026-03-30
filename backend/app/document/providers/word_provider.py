@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from app.domain.capability_types import CapabilityType
 from app.domain.document_types import DocumentType
 from app.document.providers.base import BaseDocumentProvider, ProviderResult
@@ -49,6 +47,16 @@ except Exception:
 
 class WordProvider(BaseDocumentProvider):
     document_type = DocumentType.WORD
+    SUPPORTED_CAPABILITIES = {
+        CapabilityType.READ,
+        CapabilityType.EXTRACT,
+        CapabilityType.LOCATE,
+        CapabilityType.FILL,
+        CapabilityType.VALIDATE,
+        CapabilityType.WRITE,
+        CapabilityType.COMPARE,
+        CapabilityType.SCAN_TEMPLATE,
+    }
 
     def __init__(self) -> None:
         self.parser = WordParser() if WordParser else None
@@ -62,236 +70,289 @@ class WordProvider(BaseDocumentProvider):
 
     def supported_capabilities(self) -> set[CapabilityType]:
         supported: set[CapabilityType] = set()
-
         if self.parser:
             supported.add(CapabilityType.READ)
+        if self.analyzer or self.template_scanner:
             supported.add(CapabilityType.EXTRACT)
-
         if self.locator:
             supported.add(CapabilityType.LOCATE)
-
         if self.filler:
             supported.add(CapabilityType.FILL)
-
-        if self.comparator:
-            supported.add(CapabilityType.COMPARE)
-
         if self.validator:
             supported.add(CapabilityType.VALIDATE)
-
         if self.writer:
             supported.add(CapabilityType.WRITE)
-
+        if self.comparator:
+            supported.add(CapabilityType.COMPARE)
         if self.template_scanner:
             supported.add(CapabilityType.SCAN_TEMPLATE)
-
         return supported
 
     def scan_template(self, file_path: str, **kwargs) -> ProviderResult:
         if not self.template_scanner:
-            return ProviderResult(success=False, message="Word template scanner is not available")
+            return self._unsupported("scan_template")
 
         try:
             result = self.template_scanner.scan(file_path)
-            return ProviderResult(
-                success=True,
+            return ProviderResult.ok(
                 message="Word template scanned successfully",
                 data=result,
+                capability=CapabilityType.SCAN_TEMPLATE.value,
+                provider=self.provider_name,
+                document_type=self.document_type.value,
                 raw={"provider": "word"},
             )
         except Exception as e:
-            return ProviderResult(success=False, message=f"Failed to scan word template: {e}")
+            return ProviderResult.fail(
+                message=f"Failed to scan word template: {e}",
+                error_code="WORD_SCAN_TEMPLATE_FAILED",
+                capability=CapabilityType.SCAN_TEMPLATE.value,
+                provider=self.provider_name,
+                document_type=self.document_type.value,
+            )
 
     def read(self, file_path: str, **kwargs) -> ProviderResult:
         if not self.parser:
-            return ProviderResult(success=False, message="Word parser is not available")
+            return self._unsupported("read")
 
         try:
-            parsed = self._safe_call(
-                obj=self.parser,
-                candidate_methods=["read_text", "extract_structure", "read_tables", "parse", "read", "load"],
-                file_path=file_path,
-            )
+            text = self.parser.read_text(file_path=file_path)
+            tables = self.parser.read_tables(file_path=file_path)
+            structure = self.parser.extract_structure(file_path=file_path)
 
-            return ProviderResult(
-                success=True,
+            return ProviderResult.ok(
                 message="Word document read successfully",
-                data={"document": parsed},
+                data={
+                    "text": text,
+                    "tables": tables,
+                    "structure": structure,
+                },
+                capability=CapabilityType.READ.value,
+                provider=self.provider_name,
+                document_type=self.document_type.value,
                 raw={"provider": "word"},
             )
         except Exception as e:
-            return ProviderResult(success=False, message=f"Failed to read word document: {e}")
+            return ProviderResult.fail(
+                message=f"Failed to read word document: {e}",
+                error_code="WORD_READ_FAILED",
+                capability=CapabilityType.READ.value,
+                provider=self.provider_name,
+                document_type=self.document_type.value,
+            )
 
     def extract(self, file_path: str, **kwargs) -> ProviderResult:
-        if not self.parser:
-            return ProviderResult(success=False, message="Word parser is not available")
+        if not self.analyzer and not self.template_scanner:
+            return self._unsupported("extract")
 
         try:
-            if hasattr(self.parser, "extract_structure"):
-                parsed = self.parser.extract_structure(file_path=file_path)
-            elif hasattr(self.parser, "read_text"):
-                parsed = {
-                    "text": self.parser.read_text(file_path=file_path),
-                    "tables": self.parser.read_tables(file_path=file_path) if hasattr(self.parser, "read_tables") else [],
-                }
-            else:
-                parsed = self._safe_call(
-                    obj=self.parser,
-                    candidate_methods=["extract_structure", "read_text", "read_tables", "parse", "read", "load"],
-                    file_path=file_path,
-                )
-
-            analyzed = None
-            if self.analyzer:
-                analyzed = self._safe_call(
-                    obj=self.analyzer,
-                    candidate_methods=["find_placeholders", "analyze", "extract", "run"],
-                    file_path=file_path,
-                )
-
-            return ProviderResult(
-                success=True,
+            analyzed = self.analyzer.find_placeholders(file_path=file_path) if self.analyzer else {}
+            scanned = self.template_scanner.scan(file_path=file_path) if self.template_scanner else {}
+            return ProviderResult.ok(
                 message="Word document extracted successfully",
                 data={
-                    "parsed": parsed,
-                    "structured_data": analyzed if analyzed is not None else parsed,
+                    "analyzed": analyzed,
+                    "template_fields": scanned,
                 },
+                capability=CapabilityType.EXTRACT.value,
+                provider=self.provider_name,
+                document_type=self.document_type.value,
                 raw={"provider": "word"},
             )
         except Exception as e:
-            return ProviderResult(success=False, message=f"Failed to extract word document: {e}")
+            return ProviderResult.fail(
+                message=f"Failed to extract word document: {e}",
+                error_code="WORD_EXTRACT_FAILED",
+                capability=CapabilityType.EXTRACT.value,
+                provider=self.provider_name,
+                document_type=self.document_type.value,
+            )
 
     def locate(self, file_path: str, **kwargs) -> ProviderResult:
         if not self.locator:
-            return ProviderResult(success=False, message="Word locator is not available")
+            return self._unsupported("locate")
 
         try:
-            result = self._safe_call(
-                obj=self.locator,
-                candidate_methods=["locate", "find", "run"],
-                file_path=file_path,
-                **kwargs,
-            )
-            return ProviderResult(
-                success=True,
+            result = self.locator.locate(file_path=file_path, **kwargs)
+            return ProviderResult.ok(
                 message="Targets located successfully",
                 data={"locations": result},
+                capability=CapabilityType.LOCATE.value,
+                provider=self.provider_name,
+                document_type=self.document_type.value,
                 raw={"provider": "word"},
             )
         except Exception as e:
-            return ProviderResult(success=False, message=f"Failed to locate targets: {e}")
+            return ProviderResult.fail(
+                message=f"Failed to locate targets: {e}",
+                error_code="WORD_LOCATE_FAILED",
+                capability=CapabilityType.LOCATE.value,
+                provider=self.provider_name,
+                document_type=self.document_type.value,
+            )
 
     def fill(self, file_path: str, **kwargs) -> ProviderResult:
         if not self.filler:
-            return ProviderResult(success=False, message="Word filler is not available")
+            return self._unsupported("fill")
 
         try:
-            call_kwargs = dict(kwargs)
-            call_kwargs.setdefault("file_path", file_path)
-            if "field_values" in call_kwargs and "mapping" not in call_kwargs:
-                call_kwargs["mapping"] = call_kwargs["field_values"]
+            mapping = kwargs.get("mapping") or kwargs.get("field_values") or {}
+            output_path = kwargs.get("output_path") or self._default_output_path(file_path)
+            content = str(kwargs.get("content") or "").strip()
 
-            result = self._safe_call(
-                obj=self.filler,
-                candidate_methods=["fill", "apply", "run", "write_kv_pairs_to_template"],
-                **call_kwargs,
-            )
-
-            output_path = kwargs.get("output_path")
-            if isinstance(result, dict) and not output_path:
-                output_path = result.get("output_path")
-            if isinstance(result, str) and not output_path:
-                output_path = result
+            if isinstance(mapping, dict) and mapping:
+                result = self.filler.write_kv_pairs_to_template(
+                    file_path=file_path,
+                    mapping=mapping,
+                    output_path=output_path,
+                    skip_empty_values=bool(kwargs.get("skip_empty_values", True)),
+                    overwrite_strategy=str(kwargs.get("overwrite_strategy", "replace")),
+                    preserve_format=bool(kwargs.get("preserve_format", True)),
+                    table_cell_values=kwargs.get("table_cell_values"),
+                )
+            elif content and self.writer:
+                # Fallback for "append content at end" tasks without placeholders.
+                result = self.writer.append_text(
+                    file_path=file_path,
+                    append_text=content,
+                    output_path=output_path,
+                    avoid_overwrite=False,
+                )
+                result.setdefault("replace_count", 0)
+                result.setdefault("paragraph_replace_count", 0)
+                result.setdefault("table_replace_count", 0)
+                result.setdefault("direct_cell_write_count", 0)
+                result.setdefault("used_mapping_keys", [])
+                result.setdefault("skipped_keys", [])
+                result.setdefault("overwrite_strategy", str(kwargs.get("overwrite_strategy", "replace")))
+                result.setdefault("preserve_format", bool(kwargs.get("preserve_format", True)))
+                result["appended"] = bool(content)
+            else:
+                result = self.filler.write_kv_pairs_to_template(
+                    file_path=file_path,
+                    mapping={},
+                    output_path=output_path,
+                    skip_empty_values=bool(kwargs.get("skip_empty_values", True)),
+                    overwrite_strategy=str(kwargs.get("overwrite_strategy", "replace")),
+                    preserve_format=bool(kwargs.get("preserve_format", True)),
+                    table_cell_values=kwargs.get("table_cell_values"),
+                )
 
             field_values = kwargs.get("field_values") or kwargs.get("mapping") or {}
-            return ProviderResult(
-                success=True,
+            return ProviderResult.ok(
                 message="Word document filled successfully",
                 data={
                     "field_values_count": len(field_values) if isinstance(field_values, dict) else 0,
                     "fill_result": result,
                 },
-                output_path=output_path,
+                output_path=str(result.get("output_path") or output_path),
+                capability=CapabilityType.FILL.value,
+                provider=self.provider_name,
+                document_type=self.document_type.value,
                 raw={"provider": "word"},
             )
         except Exception as e:
-            return ProviderResult(success=False, message=f"Failed to fill word document: {e}")
+            return ProviderResult.fail(
+                message=f"Failed to fill word document: {e}",
+                error_code="WORD_FILL_FAILED",
+                capability=CapabilityType.FILL.value,
+                provider=self.provider_name,
+                document_type=self.document_type.value,
+            )
 
     def compare(self, left_file_path: str, right_file_path: str, **kwargs) -> ProviderResult:
         if not self.comparator:
-            return ProviderResult(success=False, message="Word comparator is not available")
+            return self._unsupported("compare")
 
         try:
-            result = self._safe_call(
-                obj=self.comparator,
-                candidate_methods=["compare", "run"],
+            result = self.comparator.compare(
                 left_file_path=left_file_path,
                 right_file_path=right_file_path,
                 **kwargs,
             )
-            return ProviderResult(
-                success=True,
+            return ProviderResult.ok(
                 message="Word documents compared successfully",
                 data={"comparison": result},
+                capability=CapabilityType.COMPARE.value,
+                provider=self.provider_name,
+                document_type=self.document_type.value,
                 raw={"provider": "word"},
             )
         except Exception as e:
-            return ProviderResult(success=False, message=f"Failed to compare word documents: {e}")
+            return ProviderResult.fail(
+                message=f"Failed to compare word documents: {e}",
+                error_code="WORD_COMPARE_FAILED",
+                capability=CapabilityType.COMPARE.value,
+                provider=self.provider_name,
+                document_type=self.document_type.value,
+            )
 
     def validate(self, file_path: str, **kwargs) -> ProviderResult:
         if not self.validator:
-            return ProviderResult(success=False, message="Word validator is not available")
+            return self._unsupported("validate")
 
         try:
-            result = self._safe_call(
-                obj=self.validator,
-                candidate_methods=["validate", "run"],
+            result = self.validator.validate_replacements(
                 file_path=file_path,
-                **kwargs,
+                source_template_path=kwargs.get("source_template_path"),
+                expected_fields=kwargs.get("expected_fields"),
+                filled_values=kwargs.get("filled_values") or kwargs.get("field_values"),
+                fill_targets=kwargs.get("fill_targets"),
             )
-            return ProviderResult(
-                success=True,
+            return ProviderResult.ok(
                 message="Word document validated successfully",
                 data={"validation": result},
+                capability=CapabilityType.VALIDATE.value,
+                provider=self.provider_name,
+                document_type=self.document_type.value,
                 raw={"provider": "word"},
             )
         except Exception as e:
-            return ProviderResult(success=False, message=f"Failed to validate word document: {e}")
+            return ProviderResult.fail(
+                message=f"Failed to validate word document: {e}",
+                error_code="WORD_VALIDATE_FAILED",
+                capability=CapabilityType.VALIDATE.value,
+                provider=self.provider_name,
+                document_type=self.document_type.value,
+            )
 
     def write(self, file_path: str, **kwargs) -> ProviderResult:
         if not self.writer:
-            return ProviderResult(success=False, message="Word writer is not available")
+            return self._unsupported("write")
 
         try:
-            result = self._safe_call(
-                obj=self.writer,
-                candidate_methods=["write", "save", "run", "replace_text", "append_text"],
-                file_path=file_path,
-                **kwargs,
-            )
+            output_path = kwargs.get("output_path") or self._default_output_path(file_path, suffix="_written")
+            replacements = kwargs.get("replacements") or kwargs.get("field_values") or {}
+            append_text = kwargs.get("append_text")
 
-            output_path = kwargs.get("output_path")
-            if isinstance(result, dict) and not output_path:
-                output_path = result.get("output_path")
-            if isinstance(result, str) and not output_path:
-                output_path = result
+            if append_text:
+                result = self.writer.append_text(
+                    file_path=file_path,
+                    append_text=str(append_text),
+                    output_path=output_path,
+                )
+            else:
+                result = self.writer.replace_text(
+                    file_path=file_path,
+                    replacements={str(k): str(v) for k, v in dict(replacements).items()},
+                    output_path=output_path,
+                )
 
-            return ProviderResult(
-                success=True,
+            return ProviderResult.ok(
                 message="Word document written successfully",
                 data={"write_result": result},
                 output_path=output_path,
+                capability=CapabilityType.WRITE.value,
+                provider=self.provider_name,
+                document_type=self.document_type.value,
                 raw={"provider": "word"},
             )
         except Exception as e:
-            return ProviderResult(success=False, message=f"Failed to write word document: {e}")
+            return ProviderResult.fail(
+                message=f"Failed to write word document: {e}",
+                error_code="WORD_WRITE_FAILED",
+                capability=CapabilityType.WRITE.value,
+                provider=self.provider_name,
+                document_type=self.document_type.value,
+            )
 
-    @staticmethod
-    def _safe_call(obj: Any, candidate_methods: list[str], **kwargs) -> Any:
-        for method_name in candidate_methods:
-            method = getattr(obj, method_name, None)
-            if callable(method):
-                return method(**kwargs)
-        raise AttributeError(
-            f"{obj.__class__.__name__} does not have any callable methods in {candidate_methods}"
-        )

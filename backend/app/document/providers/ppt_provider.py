@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 from typing import Any
 
 from app.domain.capability_types import CapabilityType
@@ -9,7 +8,7 @@ from app.domain.document_types import DocumentType
 from app.document.providers.base import BaseDocumentProvider, ProviderResult
 
 try:
-    from pptx import Presentation
+    from pptx import Presentation  # pyright: ignore[reportMissingImports]
 except Exception:
     Presentation = None
 
@@ -17,12 +16,6 @@ except Exception:
 class PptProvider(BaseDocumentProvider):
 
     document_type = DocumentType.PPT
-
-    _PLACEHOLDER_PATTERNS = [
-        re.compile(r"\{\{\s*([^{}\n]+?)\s*\}\}"),
-        re.compile(r"<<\s*([^<>\n]+?)\s*>>"),
-        re.compile(r"【\s*([^【】\n]+?)\s*】"),
-    ]
 
     def supported_capabilities(self) -> set[CapabilityType]:
         if not Presentation:
@@ -43,7 +36,9 @@ class PptProvider(BaseDocumentProvider):
         try:
             pres = Presentation(file_path)
             preview: list[dict[str, Any]] = []
-            for slide_idx, slide in enumerate(pres.slides[:5]):
+            for slide_idx, slide in enumerate(pres.slides):
+                if slide_idx >= 5:
+                    break
                 texts = self._collect_slide_texts(slide)
                 preview.append(
                     {
@@ -137,20 +132,14 @@ class PptProvider(BaseDocumentProvider):
         try:
             pres = Presentation(file_path)
             field_values: dict[str, Any] = kwargs.get("field_values", {})
-            replacements = {str(k): str(v) for k, v in field_values.items()}
             replace_count = 0
 
             for slide in pres.slides:
                 for shape in slide.shapes:
                     if hasattr(shape, "text"):
                         original = shape.text or ""
-                        new_text = original
-                        for key, value in replacements.items():
-                            for token in (f"{{{{{key}}}}}", f"{{{key}}}", f"<<{key}>>", f"【{key}】"):
-                                count = new_text.count(token)
-                                if count:
-                                    new_text = new_text.replace(token, value)
-                                    replace_count += count
+                        new_text, count = self._replace_placeholders_in_text(original, field_values)
+                        replace_count += count
                         if new_text != original:
                             shape.text = new_text
 
@@ -159,13 +148,8 @@ class PptProvider(BaseDocumentProvider):
                         for row in table.rows:
                             for cell in row.cells:
                                 original = cell.text or ""
-                                new_text = original
-                                for key, value in replacements.items():
-                                    for token in (f"{{{{{key}}}}}", f"{{{key}}}", f"<<{key}>>", f"【{key}】"):
-                                        count = new_text.count(token)
-                                        if count:
-                                            new_text = new_text.replace(token, value)
-                                            replace_count += count
+                                new_text, count = self._replace_placeholders_in_text(original, field_values)
+                                replace_count += count
                                 if new_text != original:
                                     cell.text = new_text
 
@@ -252,18 +236,16 @@ class PptProvider(BaseDocumentProvider):
                     if not hasattr(shape, "text"):
                         continue
                     text = shape.text or ""
-                    for pattern in self._PLACEHOLDER_PATTERNS:
-                        for match in pattern.finditer(text):
-                            field = match.group(1).strip()
-                            fields.add(field)
-                            occurrences.append(
-                                {
-                                    "slide_index": slide_idx,
-                                    "shape_index": shape_idx,
-                                    "field": field,
-                                    "matched": match.group(0),
-                                }
-                            )
+                    shape_fields, shape_occurrences = self._scan_placeholders(text)
+                    fields.update(shape_fields)
+                    for item in shape_occurrences:
+                        occurrences.append(
+                            {
+                                "slide_index": slide_idx,
+                                "shape_index": shape_idx,
+                                **item,
+                            }
+                        )
 
             return ProviderResult(
                 success=True,
@@ -303,8 +285,3 @@ class PptProvider(BaseDocumentProvider):
                 rows.append([cell.text for cell in row.cells])
             tables.append({"shape_index": shape_idx, "rows": rows})
         return tables
-
-    @staticmethod
-    def _default_output_path(file_path: str, suffix: str = "_filled") -> str:
-        base, ext = os.path.splitext(file_path)
-        return f"{base}{suffix}{ext}"

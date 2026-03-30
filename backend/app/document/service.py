@@ -5,13 +5,20 @@ from typing import Any
 from app.agent.routing.capability_registry import get_capability_registry
 from app.domain.capability_types import CapabilityType
 from app.domain.document_types import detect_document_type
-from app.document.exceptions import CapabilityNotSupported, DocumentProviderError, DocumentServiceError
+from app.document.bootstrap import bootstrap_document_providers
+from app.document.exceptions import (
+    CapabilityNotSupported,
+    DocumentProviderError,
+    DocumentServiceError,
+    UnsupportedDocumentType,
+)
 from app.document.providers.base import ProviderResult
 from app.document.router import DocumentRouter
 
 
 class DocumentService:
     def __init__(self) -> None:
+        bootstrap_document_providers()
         self.registry = get_capability_registry()
         self.router = DocumentRouter()
 
@@ -73,32 +80,41 @@ class DocumentService:
         right = paths[1]
 
         capability = CapabilityType.COMPARE
-        route = self.router.route_by_capability(
-            capability=capability,
-            file_paths=[left, right],
-            filename=filename,
-            mode="multi",
-        )
-        doc_type = route.document_type
-        provider = route.provider
+        try:
+            route = self.router.route_by_capability(
+                capability=capability,
+                file_paths=[left, right],
+                filename=filename,
+                mode="multi",
+            )
+            doc_type = route.document_type
+            provider = route.provider
 
-        result = self._invoke_provider(
-            provider=provider,
-            method_name="compare",
-            call_kwargs={
-                "left_file_path": left,
-                "right_file_path": right,
-                **kwargs,
-            },
-            capability=capability,
-        )
-        return self._normalize_result(
-            result=result,
-            capability=capability.value,
-            mode="multi",
-            doc_type=doc_type.value,
-            file_paths=[left, right],
-        )
+            result = self._invoke_provider(
+                provider=provider,
+                method_name="compare",
+                call_kwargs={
+                    "left_file_path": left,
+                    "right_file_path": right,
+                    **kwargs,
+                },
+                capability=capability,
+            )
+            return self._normalize_result(
+                result=result,
+                capability=capability.value,
+                mode="multi",
+                doc_type=doc_type.value,
+                file_paths=[left, right],
+            )
+        except DocumentServiceError as exc:
+            return self._service_error_result(
+                exc=exc,
+                capability=capability.value,
+                doc_type="mixed",
+                mode="multi",
+                file_paths=[left, right],
+            )
 
     def validate_document(self, file_path: str, filename: str | None = None, **kwargs) -> ProviderResult:
         return self._call_single(
@@ -246,26 +262,35 @@ class DocumentService:
         filename: str | None,
         params: dict[str, Any],
     ) -> ProviderResult:
-        route = self.router.route_by_document_type(
-            file_path=file_path,
-            capability=capability,
-            filename=filename,
-        )
-        doc_type = route.document_type
-        provider = route.provider
-        result = self._invoke_provider(
-            provider=provider,
-            method_name=method_name,
-            call_kwargs={"file_path": file_path, **params},
-            capability=capability,
-        )
-        return self._normalize_result(
-            result=result,
-            capability=capability.value,
-            mode="single",
-            doc_type=doc_type.value,
-            file_paths=[file_path],
-        )
+        try:
+            route = self.router.route_by_document_type(
+                file_path=file_path,
+                capability=capability,
+                filename=filename,
+            )
+            doc_type = route.document_type
+            provider = route.provider
+            result = self._invoke_provider(
+                provider=provider,
+                method_name=method_name,
+                call_kwargs={"file_path": file_path, **params},
+                capability=capability,
+            )
+            return self._normalize_result(
+                result=result,
+                capability=capability.value,
+                mode="single",
+                doc_type=doc_type.value,
+                file_paths=[file_path],
+            )
+        except DocumentServiceError as exc:
+            return self._service_error_result(
+                exc=exc,
+                capability=capability.value,
+                doc_type=detect_document_type(filename=filename or file_path).value,
+                mode="single",
+                file_paths=[file_path],
+            )
 
     @staticmethod
     def _invoke_provider(provider, method_name: str, call_kwargs: dict[str, Any], capability: CapabilityType) -> ProviderResult:
@@ -292,7 +317,7 @@ class DocumentService:
         doc_type: str,
         file_paths: list[str],
     ) -> ProviderResult:
-        data = dict(result.data)
+        data = dict(result.data) if isinstance(result.data, dict) else {}
         data["_service"] = {
             "capability": capability,
             "mode": mode,
@@ -306,7 +331,44 @@ class DocumentService:
         return ProviderResult(
             success=result.success,
             message=result.message,
+            error_code=result.error_code,
+            capability=result.capability or capability,
+            provider=result.provider,
+            document_type=result.document_type or doc_type,
             data=data,
             output_path=result.output_path,
             raw=raw,
+        )
+
+    @staticmethod
+    def _service_error_result(
+        *,
+        exc: DocumentServiceError,
+        capability: str,
+        doc_type: str,
+        mode: str,
+        file_paths: list[str],
+    ) -> ProviderResult:
+        error_code = "DOCUMENT_SERVICE_ERROR"
+        if isinstance(exc, UnsupportedDocumentType):
+            error_code = "UNSUPPORTED_DOCUMENT_TYPE"
+        elif isinstance(exc, CapabilityNotSupported):
+            error_code = "CAPABILITY_NOT_SUPPORTED"
+        elif isinstance(exc, DocumentProviderError):
+            error_code = "DOCUMENT_PROVIDER_ERROR"
+
+        return ProviderResult.fail(
+            message=str(exc),
+            error_code=error_code,
+            capability=capability,
+            document_type=doc_type,
+            data={
+                "_service": {
+                    "capability": capability,
+                    "mode": mode,
+                    "document_type": doc_type,
+                    "file_paths": file_paths,
+                }
+            },
+            raw={"service": "document", "capability": capability},
         )

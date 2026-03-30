@@ -7,6 +7,8 @@ from app.agent.routing.action_handler_registry import ActionHandlerRegistry
 from app.agent.routing.capability_resolver import CapabilityResolver
 from app.agent.schemas.action import ActionObservation, ActionPlan, ActionStep
 from app.agent.schemas.plan import StepExecutionRecord
+from app.core.config import settings
+from app.core.logger import get_logger, log_event
 
 
 FAILURE_RETRYABLE = "retryable"
@@ -22,9 +24,18 @@ class Executor:
         self.capability_resolver = CapabilityResolver()
         self.context = ExecutionContext()
         self.trace: list[StepExecutionRecord] = []
+        self.logger = get_logger("app.agent.executor")
 
     def execute_plan(self, plan: ActionPlan) -> list[ActionObservation]:
         observations: list[ActionObservation] = []
+
+        if settings.ENABLE_EXECUTOR_LOGS:
+            log_event(
+                self.logger,
+                "executor.plan.start",
+                step_count=len(plan.steps),
+                steps=[step.id for step in plan.steps],
+            )
 
         for step in plan.steps:
             attempt = 0
@@ -44,17 +55,45 @@ class Executor:
                 if can_retry:
                     attempt += 1
                     self.context.state.increment_retry(step.id)
+                    if settings.ENABLE_EXECUTOR_LOGS:
+                        log_event(
+                            self.logger,
+                            "executor.step.retry",
+                            step_id=step.id,
+                            attempt=attempt,
+                            failure_reason=failure_reason,
+                            message=observation.message,
+                        )
                     continue
 
                 if failure_reason == FAILURE_REPLANNABLE:
                     self.context.state.add_intermediate_ref("replan_required", True)
                     self.context.state.add_intermediate_ref("replan_reason", observation.message)
 
+                if settings.ENABLE_EXECUTOR_LOGS:
+                    log_event(
+                        self.logger,
+                        "executor.plan.stop_on_failure",
+                        step_id=step.id,
+                        failure_reason=failure_reason,
+                        message=observation.message,
+                    )
+
                 return observations
 
         return observations
 
     def execute_step(self, step: ActionStep) -> ActionObservation:
+        if settings.ENABLE_EXECUTOR_LOGS:
+            log_event(
+                self.logger,
+                "executor.step.start",
+                step_id=step.id,
+                action_type=step.action_type,
+                input_file_ids=step.input_file_ids,
+                target_file_id=step.target_file_id,
+                params=step.params,
+            )
         try:
             self._check_dependencies(step)
             self.context.state.set_current_step(step.id)
@@ -81,6 +120,19 @@ class Executor:
 
         self.context.add_observation(observation)
         self._write_back_observation(step, observation)
+
+        if settings.ENABLE_EXECUTOR_LOGS:
+            log_event(
+                self.logger,
+                "executor.step.end",
+                step_id=step.id,
+                action_type=step.action_type,
+                success=observation.success,
+                failure_reason=observation.failure_reason,
+                message=observation.message,
+                data=observation.data,
+                produced_file_ids=observation.produced_file_ids,
+            )
 
         self.trace.append(
             StepExecutionRecord(

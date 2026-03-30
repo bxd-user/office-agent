@@ -11,12 +11,16 @@ from app.agent.routing.capability_registry import get_capability_registry
 from app.agent.schemas.action import ActionPlan
 from app.agent.schemas.plan import PlannerOutput
 from app.core.llm_client import LLMClient, LLMClientError
+from app.core.config import settings
+from app.core.logger import get_logger, log_event
+from app.domain.task_config import infer_task_type
 
 
 class PlannerV2:
     def __init__(self, llm_client: LLMClient | None = None) -> None:
         self.llm = llm_client or LLMClient()
         self.registry = get_capability_registry()
+        self.logger = get_logger("app.agent.planner")
 
     def build_plan(
         self,
@@ -27,8 +31,19 @@ class PlannerV2:
         capabilities = capabilities or {}
         allow_fallback = bool(capabilities.get("allow_fallback", False))
 
+        if settings.ENABLE_PLANNER_LOGS:
+            log_event(
+                self.logger,
+                "planner.start",
+                user_request=user_request,
+                file_count=len(files),
+                allow_fallback=allow_fallback,
+            )
+
         if not self.llm.enabled:
             if allow_fallback:
+                if settings.ENABLE_PLANNER_LOGS:
+                    log_event(self.logger, "planner.fallback.llm_disabled")
                 return self._fallback_plan(user_request=user_request, files=files)
             raise LLMClientError("LLM is not configured. Please set LLM_API_KEY / LLM_BASE_URL / LLM_MODEL")
 
@@ -48,9 +63,12 @@ class PlannerV2:
                 system_prompt=PLANNER_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 temperature=0.1,
+                metadata={"phase": "planner.build_plan"},
             )
         except LLMClientError:
             if allow_fallback:
+                if settings.ENABLE_PLANNER_LOGS:
+                    log_event(self.logger, "planner.fallback.llm_error")
                 return self._fallback_plan(user_request=user_request, files=files)
             raise
 
@@ -58,10 +76,20 @@ class PlannerV2:
             parsed = PlannerOutput.model_validate(result)
         except ValidationError as e:
             if allow_fallback:
+                if settings.ENABLE_PLANNER_LOGS:
+                    log_event(self.logger, "planner.fallback.validation_error", error=str(e))
                 return self._fallback_plan(user_request=user_request, files=files)
             raise ValueError(
                 f"Planner output validation failed: {e}; raw={json.dumps(result, ensure_ascii=False, default=str)}"
             ) from e
+
+        if settings.ENABLE_PLANNER_LOGS:
+            log_event(
+                self.logger,
+                "planner.output",
+                step_count=len(parsed.steps),
+                steps=[s.action_type for s in parsed.steps],
+            )
 
         return ActionPlan(
             steps=parsed.steps,
@@ -184,18 +212,43 @@ class PlannerV2:
             ]
         else:
             first = files[0]
-            steps = [
-                {
-                    "id": "step_extract",
-                    "action_type": "EXTRACT_STRUCTURED_DATA",
-                    "input_file_ids": [first["file_id"]],
-                    "target_file_id": None,
-                    "params": {"output_artifact_name": "extract_result"},
-                    "expected_output": {},
-                    "depends_on": [],
-                    "allow_retry": True,
-                }
-            ]
+            inferred_task_type = infer_task_type(user_request)
+            if inferred_task_type == "summarize":
+                steps = [
+                    {
+                        "id": "step_read",
+                        "action_type": "READ_DOCUMENT",
+                        "input_file_ids": [first["file_id"]],
+                        "target_file_id": None,
+                        "params": {},
+                        "expected_output": {"kind": "document_content"},
+                        "depends_on": [],
+                        "allow_retry": True,
+                    },
+                    {
+                        "id": "step_summarize",
+                        "action_type": "SUMMARIZE_CONTENT",
+                        "input_file_ids": [],
+                        "target_file_id": None,
+                        "params": {"source": "step_read", "need_validation": False},
+                        "expected_output": {"kind": "summary_text"},
+                        "depends_on": ["step_read"],
+                        "allow_retry": True,
+                    },
+                ]
+            else:
+                steps = [
+                    {
+                        "id": "step_extract",
+                        "action_type": "EXTRACT_STRUCTURED_DATA",
+                        "input_file_ids": [first["file_id"]],
+                        "target_file_id": None,
+                        "params": {"output_artifact_name": "extract_result"},
+                        "expected_output": {},
+                        "depends_on": [],
+                        "allow_retry": True,
+                    }
+                ]
 
         return ActionPlan(
             steps=PlannerOutput.model_validate({"steps": steps}).steps,
